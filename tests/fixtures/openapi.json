@@ -1,0 +1,113 @@
+{
+  "openapi": "3.0.1",
+  "info": { "title": "Test API", "version": "v1" },
+  "paths": {
+    "/api/leave": {
+      "get": {
+        "tags": ["Leave"],
+        "summary": "List leave requests",
+        "operationId": "ListLeave",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["Pending", "Approved"] } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Leave" } } } }
+          }
+        }
+      },
+      "post": {
+        "tags": ["Leave"],
+        "summary": "Create leave request",
+        "operationId": "CreateLeave",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/json": { "schema": { "$ref": "#/components/schemas/CreateLeaveRequest" } },
+            "application/json": { "schema": { "$ref": "#/components/schemas/CreateLeaveRequest" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeaveResponse" } } }
+          },
+          "400": { "description": "Bad Request" }
+        }
+      }
+    },
+    "/api/leave/pending": {
+      "get": { "tags": ["Leave"], "summary": "Pending leave for approver", "responses": { "200": { "description": "Success" } } }
+    },
+    "/api/leave/{id}": {
+      "parameters": [ { "$ref": "#/components/parameters/IdParam" } ],
+      "get": {
+        "tags": ["Leave"],
+        "summary": "Get leave by id",
+        "responses": { "200": { "description": "Success" }, "404": { "description": "Not Found" } }
+      },
+      "delete": { "tags": ["Leave"], "summary": "Delete leave", "responses": { "204": { "description": "No Content" } } }
+    },
+    "/api/leave/{id}/approve": {
+      "post": {
+        "tags": ["Leave"],
+        "summary": "Approve leave",
+        "parameters": [ { "$ref": "#/components/parameters/IdParam" } ],
+        "responses": { "200": { "description": "Success" }, "403": { "description": "Forbidden" } }
+      }
+    },
+    "/api/staff/{id}": {
+      "get": {
+        "tags": ["Staff"],
+        "summary": "Get staff member",
+        "parameters": [ { "$ref": "#/components/parameters/IdParam" } ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Staff" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "IdParam": { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+    },
+    "schemas": {
+      "LeaveType": { "type": "integer", "format": "int32", "enum": [0, 1, 2] },
+      "CreateLeaveRequest": {
+        "type": "object",
+        "required": ["from", "to", "type"],
+        "properties": {
+          "from": { "type": "string", "format": "date" },
+          "to": { "type": "string", "format": "date" },
+          "type": { "$ref": "#/components/schemas/LeaveType" },
+          "note": { "type": "string", "nullable": true }
+        }
+      },
+      "Leave": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string" },
+          "warnings": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "LeaveResponse": {
+        "type": "object",
+        "properties": { "data": { "$ref": "#/components/schemas/Leave" } }
+      },
+      "Staff": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "manager": { "allOf": [ { "$ref": "#/components/schemas/Staff" } ], "nullable": true },
+          "reports": { "type": "array", "items": { "$ref": "#/components/schemas/Staff" } }
+        }
+      }
+    }
+  }
+}

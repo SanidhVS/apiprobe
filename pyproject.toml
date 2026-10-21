@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apiprobe"
+version = "0.1.0"
+description = "AI-assisted API testing CLI: run approved test plans against OpenAPI apps"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+apiprobe = "apiprobe.cli:main"
+
+[tool.setuptools]
+packages = ["apiprobe"]
