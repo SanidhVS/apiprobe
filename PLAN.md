@@ -26,6 +26,7 @@ The AI writes the endpoint, but the developer still tests it by hand: open Swagg
 | D10 | Core is a library that returns data and never prints or exits; CLI is a thin layer on top | A UI (future) can call the same core |
 | D11 | No PII masking in v1 | Dev data. Revisit if dev DBs contain copies of real staff data |
 | D12 | Repo ships an agent-facing setup guide (`skill/APP_SETUP.md`): the agent discovers config values from the app's repo, asks the user only for the rest in one message, and writes the app JSON | Onboarding a new app needs no hand-written JSON beyond optional passwords |
+| D13 | **Bearer tokens only** (supersedes the username/password + `login` parts of D4, 7.2–7.4, 13, 13.1). Users are `{token}`; a `login` section or username/password is `CONFIG_INVALID`. The agent asks the user for a fresh token when one is missing, expired (JWT `exp` checked before any request → `TOKEN_EXPIRED`) or rejected (401 → hint naming the config field) | Asking for credentials risks misuse; tokens are short-lived |
 
 ## 3. Non-goals for v1
 
@@ -295,10 +296,11 @@ An expectation object whose only key is `exists` or `contains` is an operator. A
 |---|---|
 | `CONFIG_INVALID` | App config file malformed or missing fields |
 | `APP_NOT_FOUND` | No config matches `--app` or the current folder |
+| `APP_EXISTS` | `init` target config already exists |
 | `ENV_NOT_FOUND` | Environment name not in config |
 | `USER_NOT_FOUND` | Role in plan/call not in config |
 | `USER_NOT_CONFIGURED` | User still has `CHANGE_ME` / empty token |
-| `LOGIN_FAILED` | Login call failed or `tokenPath` not found |
+| `TOKEN_EXPIRED` | Role's JWT is past its `exp` (D13). `LOGIN_FAILED` was removed with login support |
 | `SPEC_UNAVAILABLE` | Could not fetch/parse the OpenAPI spec |
 | `ENDPOINT_NOT_FOUND` | `show` target not in spec |
 | `PLAN_INVALID` | Plan JSON malformed or violates rules |

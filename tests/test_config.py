@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import io
 import json
@@ -15,8 +16,8 @@ def valid_cfg(repo=None, **over):
         "specUrl": "/openapi.json",
         "defaultEnvironment": "local",
         "environments": {"local": {"baseUrl": "http://127.0.0.1:1/", "users": {
-            "admin": {"username": "a", "password": "pw"},
-            "todo": {"username": "b", "password": "CHANGE_ME"},
+            "admin": {"token": "tok-admin"},
+            "todo": {"token": "CHANGE_ME"},
             "bot": {"token": ""},
         }}},
     }
@@ -70,9 +71,8 @@ class ConfigTests(unittest.TestCase):
             ({"specUrl": None}, "specUrl"),
             ({"defaultEnvironment": "dev"}, "defaultEnvironment"),
             ({"environments": {"local": {"baseUrl": "localhost:5000"}}}, "environments.local.baseUrl"),
-            ({"environments": {"local": {"baseUrl": "http://x", "users": {"u": {"username": "x"}}}}}, "environments.local.users.u"),
-            ({"login": {"path": "/login"}}, "login.body"),
-            ({"login": {"path": "/login", "body": {}}}, "login.tokenPath"),
+            ({"environments": {"local": {"baseUrl": "http://x", "users": {"u": {"username": "x", "password": "y"}}}}}, "environments.local.users.u"),
+            ({"login": {"path": "/login"}}, "login"),
             ({"timeoutSeconds": 0}, "timeoutSeconds"),
         ]
         for over, field in cases:
@@ -134,7 +134,7 @@ class ConfigTests(unittest.TestCase):
     def test_init_writes_template_and_refuses_overwrite(self):
         path = config.init_app("new-app", str(self.root))
         data = json.loads(path.read_text())
-        self.assertEqual(data["environments"]["local"]["users"]["admin"]["password"], "CHANGE_ME")
+        self.assertEqual(data["environments"]["local"]["users"]["admin"], {"token": "CHANGE_ME"})
         self.assertEqual(config.load_app("new-app")["name"], "new-app")  # template itself is valid
         self.assertError("APP_EXISTS", lambda: config.init_app("new-app", None), str(path))
 
@@ -142,10 +142,25 @@ class ConfigTests(unittest.TestCase):
         path = self.write("demo", valid_cfg())
         app = config.load_app("demo")  # placeholders don't block loading
         env = config.resolve_env(app, None)
-        self.assertEqual(config.get_user(app, env, "admin")["password"], "pw")
-        self.assertError("USER_NOT_CONFIGURED", lambda: config.get_user(app, env, "todo"), str(path), "local.users.todo")
+        self.assertEqual(config.get_user(app, env, "admin")["token"], "tok-admin")
+        self.assertError("USER_NOT_CONFIGURED", lambda: config.get_user(app, env, "todo"), str(path), "local.users.todo.token")
         self.assertError("USER_NOT_CONFIGURED", lambda: config.get_user(app, env, "bot"), "bot.token")
         self.assertError("USER_NOT_FOUND", lambda: config.get_user(app, env, "ghost"), "ghost", "admin")
+
+    def test_expired_jwt(self):
+        def jwt(claims):
+            payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+            return f"eyJhbGciOiJIUzI1NiJ9.{payload}.sig"
+        users = {"old": {"token": jwt({"exp": 1000})}, "fresh": {"token": jwt({"exp": 4102444800})},
+                 "noexp": {"token": jwt({"sub": "x"})}, "opaque": {"token": "not-a-jwt"}}
+        path = self.write("demo", valid_cfg(environments={"local": {"baseUrl": "http://x", "users": users}}))
+        app = config.load_app("demo")
+        env = config.resolve_env(app, None)
+        self.assertError("TOKEN_EXPIRED", lambda: config.get_user(app, env, "old"), str(path), "users.old.token", "1970-01-01")
+        for role in ("fresh", "noexp", "opaque"):
+            self.assertEqual(config.get_user(app, env, role), users[role])
+        self.assertEqual(config.jwt_expiry(users["old"]["token"]), 1000)
+        self.assertIsNone(config.jwt_expiry("a.%%%.c"))
 
     def test_unknown_env(self):
         self.write("demo", valid_cfg())

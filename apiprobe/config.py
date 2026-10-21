@@ -1,7 +1,10 @@
 """App config: ~/.apiprobe/apps/<name>.json (PLAN.md section 7)."""
+import base64
 import json
 import os
 import re
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .errors import ApiProbeError
@@ -61,18 +64,8 @@ def _validate(cfg, path: Path) -> list[str]:
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         problems.append("field 'timeoutSeconds' must be a positive number")
 
-    login = cfg.get("login")
-    if login is not None:
-        if not isinstance(login, dict):
-            problems.append("field 'login' must be an object")
-        else:
-            need_str(login, "path", "login.path")
-            if isinstance(login.get("path"), str) and not login["path"].startswith("/"):
-                problems.append("field 'login.path' must start with '/'")
-            if "body" not in login:
-                problems.append("field 'login.body' is required when 'login' is set")
-            if not isinstance(login.get("tokenPath"), str):
-                problems.append("field 'login.tokenPath' is required when 'login' is set (dotted path, e.g. data.token)")
+    if "login" in cfg:
+        problems.append("field 'login' is no longer supported; remove it and give each user a 'token'")
 
     envs = cfg.get("environments")
     if not isinstance(envs, dict) or not envs:
@@ -98,8 +91,8 @@ def _validate(cfg, path: Path) -> list[str]:
             problems.append(f"field '{where}.users' must be an object")
             continue
         for role, user in users.items():
-            if not isinstance(user, dict) or not ("token" in user or ("username" in user and "password" in user)):
-                problems.append(f"field '{where}.users.{role}' must have either 'token' or both 'username' and 'password'")
+            if not isinstance(user, dict) or not isinstance(user.get("token"), str):
+                problems.append(f"field '{where}.users.{role}' must be {{\"token\": \"...\"}} (username/password is not supported)")
     return problems
 
 
@@ -144,17 +137,11 @@ def init_app(name: str, repo_path: str | None) -> Path:
         "specUrl": "/swagger/v1/swagger.json",
         "defaultEnvironment": "local",
         "timeoutSeconds": 30,
-        "login": {
-            "method": "POST",
-            "path": "/api/auth/login",
-            "body": {"username": "{{username}}", "password": "{{password}}"},
-            "tokenPath": "data.token",
-        },
         "environments": {
             "local": {
                 "baseUrl": "https://localhost:5001",
                 "verifyTls": False,
-                "users": {"admin": {"username": PLACEHOLDER, "password": PLACEHOLDER}},
+                "users": {"admin": {"token": PLACEHOLDER}},
             }
         },
     }
@@ -174,6 +161,19 @@ def resolve_env(app: dict, env: str | None) -> dict:
     return {"name": name, "baseUrl": e["baseUrl"].rstrip("/"), "verifyTls": e.get("verifyTls", True), "users": e.get("users", {})}
 
 
+def jwt_expiry(token: str) -> int | None:
+    """The `exp` claim of a JWT, or None if the token is not a JWT or has no exp."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    exp = claims.get("exp") if isinstance(claims, dict) else None
+    return exp if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
+
+
 def get_user(app: dict, env: dict, role: str) -> dict:
     """The user entry for a role; raises only when the role is actually used (PLAN.md 7.4)."""
     where = f"environments.{env['name']}.users"
@@ -181,9 +181,11 @@ def get_user(app: dict, env: dict, role: str) -> dict:
         known = ", ".join(env["users"]) or "none"
         raise ApiProbeError("USER_NOT_FOUND", f"role '{role}' not in {app['configPath']} field '{where}' (known roles: {known})")
     user = env["users"][role]
-    if "token" in user:
-        if not user["token"] or user["token"] == PLACEHOLDER:
-            raise ApiProbeError("USER_NOT_CONFIGURED", f"fill in field '{where}.{role}.token' in {app['configPath']}")
-    elif PLACEHOLDER in (user["username"], user["password"]) or not user["password"]:
-        raise ApiProbeError("USER_NOT_CONFIGURED", f"fill in fields '{where}.{role}.username' / 'password' in {app['configPath']} (still {PLACEHOLDER})")
+    field = f"field '{where}.{role}.token' in {app['configPath']}"
+    if not user["token"].strip() or user["token"] == PLACEHOLDER:
+        raise ApiProbeError("USER_NOT_CONFIGURED", f"no token for role '{role}': paste a fresh token into {field}")
+    exp = jwt_expiry(user["token"])
+    if exp is not None and exp <= time.time():
+        when = datetime.fromtimestamp(exp, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+        raise ApiProbeError("TOKEN_EXPIRED", f"token for role '{role}' expired at {when}: generate a new one and paste it into {field}")
     return user

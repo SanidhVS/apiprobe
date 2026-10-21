@@ -10,12 +10,10 @@ from stub_server import StubServer
 
 
 def make_app(base_url, **users):
-    users = users or {"admin": {"username": "admin", "password": "pw"}}
+    users = users or {"admin": {"token": "tok-admin"}}
     return {
         "name": "demo", "configPath": "C:/home/apps/demo.json", "specUrl": "/openapi.json",
         "defaultEnvironment": "local", "timeoutSeconds": 1,
-        "login": {"method": "POST", "path": "/login",
-                  "body": {"username": "{{username}}", "password": "{{password}}"}, "tokenPath": "data.token"},
         "environments": {"local": {"baseUrl": base_url, "users": users}},
     }
 
@@ -64,26 +62,6 @@ class HttpTests(TempHome):
             http.send(env_of(self.app), 0.3, "GET", "/slow")
         self.assertEqual(ctx.exception.code, "REQUEST_FAILED")
 
-    def test_login(self):
-        self.assertEqual(http.login(self.app, env_of(self.app), "admin"), "tok-admin")
-
-    def test_static_token(self):
-        app = make_app(self.server.url, bot={"token": "abc"})
-        self.assertEqual(http.login(app, env_of(app), "bot"), "abc")
-        self.assertEqual(self.server.requests, [])
-
-    def test_bad_password_and_token_path(self):
-        app = make_app(self.server.url, admin={"username": "admin", "password": "wrong"})
-        with self.assertRaises(ApiProbeError) as ctx:
-            http.login(app, env_of(app), "admin")
-        self.assertEqual(ctx.exception.code, "LOGIN_FAILED")
-        self.assertIn("401", ctx.exception.message)
-        self.app["login"]["tokenPath"] = "data.jwt"
-        with self.assertRaises(ApiProbeError) as ctx:
-            http.login(self.app, env_of(self.app), "admin")
-        self.assertEqual(ctx.exception.code, "LOGIN_FAILED")
-        self.assertIn("data.jwt", ctx.exception.message)
-
 
 PASS_PLAN = {
     "title": "Create and read item",
@@ -116,8 +94,7 @@ class RunnerTests(TempHome):
         self.assertEqual(r["cleanup"][0]["status"], "passed")
         self.assertEqual(r["cleanup"][0]["responseStatus"], 204)
         self.assertEqual(r["manualChecks"][0]["sql"], f"SELECT * FROM Items WHERE Id = '{item_id}'")
-        logins = [q for q in self.server.requests if q["path"] == "/login"]
-        self.assertEqual(len(logins), 1)  # token reused within run
+        self.assertTrue(all(q["headers"]["Authorization"] == "Bearer tok-admin" for q in self.server.requests))
         self.assertTrue(Path(r["savedTo"]).name.endswith("-create-item.json"))
         self.assertEqual(Path(r["savedTo"]).parent, Path(self.tmp.name) / "runs" / "demo")
 
@@ -174,10 +151,27 @@ class RunnerTests(TempHome):
         self.assertEqual(r["status"], "failed")
         self.assertEqual(r["steps"][0]["error"]["code"], "REQUEST_FAILED")
 
-    def test_login_failure_fails_step(self):
-        self.app["environments"]["local"]["users"]["admin"]["password"] = "wrong"
+    def test_rejected_token_gets_hint(self):
+        self.app["environments"]["local"]["users"]["admin"]["token"] = "revoked"
+        plan = {"title": "t", "steps": [{"id": "a", "call": {"method": "GET", "path": "/protected", "as": "admin"}}]}
+        r, _ = self.run_plan(plan)
+        msg = r["steps"][0]["assertions"][0]["message"]
+        self.assertIn("got 401", msg)
+        self.assertIn("users.admin.token", msg)
+
+    def test_expected_401_has_no_hint(self):
+        self.app["environments"]["local"]["users"]["admin"]["token"] = "revoked"
+        plan = {"title": "t", "steps": [{"id": "a", "call": {"method": "GET", "path": "/protected", "as": "admin"},
+                                         "expect": {"status": 401}}]}
+        r, _ = self.run_plan(plan)
+        self.assertEqual(r["status"], "passed")
+
+    def test_expired_token_stops_before_any_request(self):
+        self.app["environments"]["local"]["users"]["admin"]["token"] = "x.eyJleHAiOjEwMDB9.y"  # exp 1000
         r, _ = self.run_plan(PASS_PLAN)
-        self.assertEqual(r["steps"][0]["error"]["code"], "LOGIN_FAILED")
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["error"]["code"], "TOKEN_EXPIRED")
+        self.assertEqual(self.server.requests, [])
 
     def test_invalid_plan_lists_all_issues_and_sends_nothing(self):
         plan = {"title": "bad", "steps": [
@@ -197,7 +191,7 @@ class RunnerTests(TempHome):
         self.assertTrue(Path(r["savedTo"]).is_file())
 
     def test_change_me_role_stops_before_any_request(self):
-        self.app["environments"]["local"]["users"]["todo"] = {"username": "x", "password": "CHANGE_ME"}
+        self.app["environments"]["local"]["users"]["todo"] = {"token": "CHANGE_ME"}
         plan = {"title": "t", "steps": [{"id": "a", "call": {"method": "GET", "path": "/echo"}},
                                         {"id": "b", "call": {"method": "GET", "path": "/echo", "as": "todo"}}]}
         r, _ = self.run_plan(plan)
@@ -208,15 +202,14 @@ class RunnerTests(TempHome):
         self.assertEqual(self.server.requests, [])
 
     def test_unused_change_me_role_does_not_block(self):
-        self.app["environments"]["local"]["users"]["todo"] = {"username": "x", "password": "CHANGE_ME"}
+        self.app["environments"]["local"]["users"]["todo"] = {"token": "CHANGE_ME"}
         r, _ = self.run_plan(PASS_PLAN)
         self.assertEqual(r["status"], "passed")
 
-    def test_token_and_password_not_in_saved_json(self):
+    def test_token_not_in_saved_json(self):
         r, _ = self.run_plan(PASS_PLAN)
         saved = Path(r["savedTo"]).read_text()
         self.assertNotIn("tok-admin", saved)
-        self.assertNotIn('"pw"', saved)
         self.assertEqual(json.loads(saved)["status"], "passed")
 
     def test_unknown_env(self):

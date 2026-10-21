@@ -12,7 +12,7 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 2. Never change an expectation after a run to make it pass without asking the user.
 3. Every expectation has a `source` (File:line). If you could not find one, label it "assumption" in the plan table.
 4. Never run a plan before the user approves it.
-5. Passwords/tokens: by default write `CHANGE_ME` and tell the user which config file and field to fill. Write a real value only if the user chooses to give it (dev/test accounts only).
+5. Auth is bearer tokens only. Never ask for, accept or store usernames or passwords; if the user offers one, say a token is enough. When a role has no token, or you get USER_NOT_CONFIGURED, TOKEN_EXPIRED or a 401 with a "token ... may be expired" hint, ask the user to generate a fresh token for that role and either paste it here (you write it into the config field the error names) or paste it into that field themselves (keeps it out of the chat). Never write a token anywhere else: not in plans, the repo, or your replies.
 6. Never add a production URL to a config. If the user asks, refuse and explain.
 7. Write endpoints (POST/PUT/PATCH/DELETE) are not "done" without manualChecks or an explicit note that DB state was not checked.
 8. Always use `--json` when you need to read output; show the user the human summary.
@@ -44,7 +44,9 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 
 ### 5. Run
 - `apiprobe run <plan> --json`.
-- Exit 2 with USER_NOT_CONFIGURED / CONFIG_INVALID → tell user exactly which file/field to fix; wait.
+- Exit 2 with USER_NOT_CONFIGURED / TOKEN_EXPIRED → ask for a fresh token for that role (rule 5); rerun once it is in.
+- Exit 2 with CONFIG_INVALID → tell user exactly which file/field to fix; wait.
+- A step failed with 401 and a token hint → the token was rejected (expired early, revoked, wrong environment). Ask for a fresh one; do not report it as an app bug.
 - Exit 2 with REQUEST_FAILED → ask the user to start the API (do not start it yourself).
 
 ### 6. Report

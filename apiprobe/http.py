@@ -1,4 +1,4 @@
-"""One HTTP call + login, stdlib urllib only (PLAN.md 8.6, 10)."""
+"""One HTTP call, stdlib urllib only (PLAN.md 8.6, 10)."""
 import json
 import ssl
 import time
@@ -6,9 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .config import get_user
 from .errors import ApiProbeError
-from .vars import lookup, substitute
 
 
 def _text(v) -> str:
@@ -61,22 +59,3 @@ def send(env: dict, timeout: int, method, path, query=None, headers=None, body=N
         parsed = None
     return {"status": status, "headers": resp_headers, "body": parsed, "bodyText": text, "durationMs": duration, "url": url}
 
-
-def login(app: dict, env: dict, role: str) -> str:
-    """Return a bearer token for the role: static token, or call the app's login endpoint."""
-    user = get_user(app, env, role)
-    if "token" in user:
-        return user["token"]
-    cfg = app.get("login")
-    if not cfg:
-        raise ApiProbeError("LOGIN_FAILED", f"role '{role}' has username/password but {app['configPath']} has no 'login' section; add one or give the role a 'token'")
-    body = substitute(cfg["body"], {"username": user["username"], "password": user["password"]})
-    method = cfg.get("method", "POST")
-    resp = send(env, app.get("timeoutSeconds", 30), method, cfg["path"], body=body)
-    where = f"{method.upper()} {cfg['path']} as '{role}'"
-    if not 200 <= resp["status"] < 300:
-        raise ApiProbeError("LOGIN_FAILED", f"{where} returned {resp['status']}: {resp['bodyText'][:300]}. Check credentials and 'login' in {app['configPath']}")
-    found, token = lookup(resp["body"], cfg["tokenPath"])
-    if not found or not isinstance(token, str) or not token:
-        raise ApiProbeError("LOGIN_FAILED", f"{where}: no token at tokenPath '{cfg['tokenPath']}' in response {resp['bodyText'][:300]}. Fix 'login.tokenPath' in {app['configPath']}")
-    return token

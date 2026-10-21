@@ -70,7 +70,7 @@ def cmd_app(args):
 
 def cmd_init(args):
     path = config.init_app(args.name, args.repo or str(Path.cwd()))
-    return {"path": str(path)}, 0, lambda: print(f"Wrote {path}\nFill in the CHANGE_ME values (baseUrl, login, users) before use.")
+    return {"path": str(path)}, 0, lambda: print(f"Wrote {path}\nSet baseUrl/specUrl, then replace each CHANGE_ME with a bearer token for that role.")
 
 
 def cmd_find(args):
@@ -135,7 +135,7 @@ def cmd_call(args):
             raise ApiProbeError("PLAN_INVALID", f"--body is not valid JSON: {e.msg}")
     app = _app(args)
     env = config.resolve_env(app, args.env)
-    token = http.login(app, env, args.as_) if args.as_ else None
+    token = config.get_user(app, env, args.as_)["token"] if args.as_ else None
     resp = http.send(env, app.get("timeoutSeconds", 30), args.method, args.path,
                      _kv(args.query, "--query"), _kv(args.header, "--header"), body, token)
     code = 0 if 200 <= resp["status"] < 300 else 1
@@ -144,6 +144,8 @@ def cmd_call(args):
         print(f"{args.method.upper()} {resp['url']}  →  {resp['status']}  {resp['durationMs']}ms")
         if resp["bodyText"]:
             print(_truncate(_body_text(resp["body"]) if resp["body"] is not None else resp["bodyText"]))
+        if resp["status"] == 401 and args.as_:
+            print(f"hint: {runner.token_hint(app, env, args.as_)}", file=sys.stderr)
     return resp, code, show
 
 

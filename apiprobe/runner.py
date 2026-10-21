@@ -145,6 +145,11 @@ def _roles(plan: dict) -> set:
 
 # ---------- execution ----------
 
+def token_hint(app: dict, env: dict, role: str) -> str:
+    return (f"token for role '{role}' may be expired or invalid: generate a new one and paste it into "
+            f"field 'environments.{env['name']}.users.{role}.token' in {app['configPath']}")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -158,18 +163,14 @@ def _is_json(text: str) -> bool:
 
 
 class _Session:
-    """Per-run state: env, lazily-fetched tokens, variables."""
+    """Per-run state: env, variables."""
 
     def __init__(self, app, env):
-        self.app, self.env, self.tokens, self.variables = app, env, {}, {}
+        self.app, self.env, self.variables = app, env, {}
         self.timeout = app.get("timeoutSeconds", 30)
 
     def token(self, role):
-        if not role:
-            return None
-        if role not in self.tokens:
-            self.tokens[role] = http.login(self.app, self.env, role)
-        return self.tokens[role]
+        return get_user(self.app, self.env, role)["token"] if role else None
 
     def prepare(self, call) -> dict:
         """Substitute variables; raises VAR_UNDEFINED before anything is sent."""
@@ -214,6 +215,8 @@ def _run_step(step, s: _Session) -> dict:
         ok = resp["status"] == want
         asserts.append({"target": "status", "expected": want, "actual": resp["status"], "passed": ok,
                         "message": "" if ok else f"expected {want}, got {resp['status']}"})
+    if resp["status"] == 401 and call.get("as") and asserts[0]["message"]:
+        asserts[0]["message"] += f" ({token_hint(s.app, s.env, call['as'])})"
     for path, expectation in expect.get("json", {}).items():
         if is_json:
             found, value = lookup(resp["body"], path)

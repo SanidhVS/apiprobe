@@ -1,4 +1,4 @@
-"""Tiny local HTTP server for tests: login, echo, items CRUD, protected, slow, text."""
+"""Tiny local HTTP server for tests: echo, items CRUD, protected (Bearer tok-*), slow, text."""
 import json
 import threading
 import time
@@ -31,10 +31,6 @@ class _Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         parts = url.path.strip("/").split("/")
 
-        if url.path == "/login" and self.command == "POST":
-            if body and body.get("password") == "pw":
-                return self._reply(200, {"data": {"token": f"tok-{body['username']}"}})
-            return self._reply(401, {"message": "bad credentials"})
         if url.path == "/echo":
             return self._reply(200, {"method": self.command, "query": urllib.parse.parse_qs(url.query),
                                      "headers": {"X-Test": self.headers.get("X-Test")}, "body": body, "auth": auth})
