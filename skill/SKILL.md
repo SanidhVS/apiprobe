@@ -143,5 +143,5 @@ Global flags on every command (put them after the command): `--app NAME`, `--env
 
 - `--json` prints the result as JSON only; errors as `{"error": {"code", "message"}}`.
 - Error messages name the file and field to fix — relay them to the user as is.
-- If `apiprobe` is not on PATH, use `python -m apiprobe` instead.
+- If `apiprobe` is not found, ask the user to install it from the apiprobe repo with `uv tool install --editable .` (then `uv tool update-shell` and a new terminal); do not install it yourself.
 - **Windows Git Bash:** it rewrites arguments that start with `/` into Windows paths (`/api/x` → `C:/Program Files/Git/api/x`). Prefix commands that pass a path argument with `MSYS_NO_PATHCONV=1`, e.g. `MSYS_NO_PATHCONV=1 apiprobe call GET /api/leave --as admin`. Plan files are not affected.

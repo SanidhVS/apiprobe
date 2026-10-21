@@ -112,7 +112,7 @@ Keep each module small. If a module passes ~250 lines, check for over-engineerin
 ## 6. Environment
 
 - Python 3.14 is installed on the dev machine (minimum supported: 3.10, for `match` and `X | Y` types).
-- `pipx` is **not** installed. Install with `pip install -e .` from the repo root; this puts `apiprobe` on PATH via Python's Scripts folder.
+- Install with uv: `uv tool install --editable .` from the repo root (isolated env, `apiprobe.exe` in `~/.local/bin`, which is on PATH). Dev/tests: `uv run python -m unittest discover -s tests -v` (`.venv` from `uv.lock`). The earlier `pip install -e .` put the exe in Python's `Scripts` folder, which was not on PATH.
 - Tests use `unittest` (stdlib): `python -m unittest discover -s tests -v`.
 
 ## 7. App config
@@ -573,7 +573,7 @@ Each step ends with a check. Do not start the next step until the check passes.
 
 1. **Scaffold repo**
    - `git init`, create layout from section 5, `pyproject.toml` (setuptools, `requires-python = ">=3.10"`, `[project.scripts] apiprobe = "apiprobe.cli:main"`, no dependencies), `.gitignore`, `apiprobe/__init__.py`, `errors.py`.
-   - Check: `pip install -e .` succeeds; `apiprobe --help` prints usage.
+   - Check: `uv tool install --editable .` succeeds; `apiprobe --help` prints usage.
 
 2. **`vars.py`** — `lookup`, `substitute` (incl. `$uuid`, `$now`, exact-match type preservation).
    - Tests (`test_vars.py`): nested path, array index, root array, missing vs null, out of range, exact-match keeps int, embedded stringifies, undefined raises `VAR_UNDEFINED`, `$uuid` differs per occurrence.
@@ -601,7 +601,7 @@ Each step ends with a check. Do not start the next step until the check passes.
    - Check: in a new Claude Code session inside another repo, the skill is listed and triggers on "test the X endpoint".
    - Check: in a repo with no config, the agent follows APP_SETUP.md, asks one batch of questions, and writes a config that `apiprobe app` detects.
 
-10. **README.md** — what it is, install (`pip install -e .`, copy skill), config example, plan example, security notes (7.7), command table.
+10. **README.md** — what it is, install (`uv tool install --editable .`, copy skill), config example, plan example, security notes (7.7), command table.
 
 11. **End-to-end on HR Portal** (acceptance, section 15).
 

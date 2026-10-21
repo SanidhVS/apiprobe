@@ -8,12 +8,16 @@ AI-assisted API testing for backend developers. An AI coding assistant (Claude C
 
 ## Install
 
+Uses [uv](https://docs.astral.sh/uv/). apiprobe gets its own isolated environment, so nothing touches your global Python.
+
 ```powershell
 cd C:\Projects\apiprobe
-pip install -e .
+uv tool install --editable .
 ```
 
-This puts `apiprobe` in Python's `Scripts` folder. If `apiprobe` is not found, add that folder to PATH (`python -c "import sysconfig; print(sysconfig.get_path('scripts'))"` prints it) or use `python -m apiprobe` instead.
+This puts `apiprobe.exe` in `~/.local/bin`. If `apiprobe` is not found, run `uv tool update-shell` and open a new terminal. `--editable` means code changes apply without reinstalling; after changing `pyproject.toml` (e.g. the console script), run `uv tool install --editable . --force`.
+
+Don't also `pip install` it into your global Python — two installs can shadow each other.
 
 Install the Claude Code skill by copying the `skill/` folder:
 
@@ -21,7 +25,7 @@ Install the Claude Code skill by copying the `skill/` folder:
 Copy-Item -Recurse -Force skill "$HOME\.claude\skills\apiprobe"
 ```
 
-Tests: `python -m unittest discover -s tests -v`
+Tests (uv creates `.venv` from `uv.lock` on first run): `uv run python -m unittest discover -s tests -v`
 
 ## Quick start
 

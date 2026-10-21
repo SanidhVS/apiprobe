@@ -43,7 +43,7 @@ Template:
 3. If tokens are filled: `apiprobe call GET <a simple authenticated GET endpoint> --as <role>` → 2xx. On TOKEN_EXPIRED or 401, ask for a fresh token for that role.
 4. If `CHANGE_ME` remains: list each file + field the user must fill, and stop until they confirm.
 
-On Windows Git Bash, prefix commands that pass a `/path` argument with `MSYS_NO_PATHCONV=1`. If `apiprobe` is not on PATH, use `python -m apiprobe`.
+On Windows Git Bash, prefix commands that pass a `/path` argument with `MSYS_NO_PATHCONV=1`. If `apiprobe` is not found, ask the user to install it from the apiprobe repo with `uv tool install --editable .` (then `uv tool update-shell` and a new terminal); do not install it yourself.
 
 Report: what was discovered (with sources), what the user provided, what is still missing.
 
