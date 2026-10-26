@@ -3,9 +3,11 @@ import json
 import re
 import time
 from datetime import datetime, timezone
+from http.cookiejar import CookieJar
 from pathlib import Path
 
 from . import http
+from .assertions import check, expectation_problems, show as _show, status_problems, status_ok
 from .body import check_call_body, check_save_to, resolve_file, resolve_multipart, resolve_output, summarize
 from .config import get_user, resolve_env
 from .errors import ApiProbeError
@@ -14,48 +16,6 @@ from .vars import lookup, substitute, valid_path
 
 METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _ID_RE = re.compile(r"[a-z0-9_]+")
-
-
-# ---------- assertions ----------
-
-def _equal(a, b) -> bool:
-    """JSON deep-equal: true != 1, 1 == 1.0."""
-    if isinstance(a, bool) or isinstance(b, bool):
-        return type(a) is type(b) and a == b
-    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-        return a == b
-    if isinstance(a, dict) and isinstance(b, dict):
-        return a.keys() == b.keys() and all(_equal(a[k], b[k]) for k in a)
-    if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(_equal(x, y) for x, y in zip(a, b))
-    return type(a) is type(b) and a == b
-
-
-def _show(v) -> str:
-    return json.dumps(v)
-
-
-def check(expectation, found: bool, value) -> tuple[bool, str]:
-    is_op = isinstance(expectation, dict) and len(expectation) == 1 and next(iter(expectation)) in ("exists", "contains")
-    if is_op and "exists" in expectation:
-        want = expectation["exists"]
-        if found == bool(want):
-            return True, ""
-        return False, "path not found" if want else f"expected path to be absent, got {_show(value)}"
-    if not found:
-        return False, "path not found"
-    if is_op:
-        x = expectation["contains"]
-        if isinstance(value, str):
-            ok = isinstance(x, str) and x in value
-        elif isinstance(value, list):
-            ok = any(_equal(e, x) for e in value)
-        else:
-            return False, f"contains needs a string or list, got {type(value).__name__} {_show(value)}"
-        return (True, "") if ok else (False, f"expected to contain {_show(x)}, got {_show(value)}")
-    if _equal(value, expectation):
-        return True, ""
-    return False, f"expected {_show(expectation)}, got {_show(value)}"
 
 
 # ---------- plan loading / validation ----------
@@ -77,7 +37,7 @@ def _check_call(call, where: str, env: dict, problems: list, files=None):
     if not isinstance(call.get("method"), str) or call["method"].upper() not in METHODS:
         problems.append(f"{where}.method must be one of {', '.join(sorted(METHODS))}")
     path = call.get("path")
-    if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+    if not isinstance(path, str) or not path.startswith(("/", "{{")) or path.startswith("//"):  # "{{var}}" is checked after substitution
         problems.append(f"{where}.path must be a path starting with '/' (absolute URLs are not allowed), got {_show(path)}")
     role = call.get("as")
     if role is not None and role not in env["users"]:
@@ -87,6 +47,11 @@ def _check_call(call, where: str, env: dict, problems: list, files=None):
             problems.append(f"{where}.{key} must be an object")
     check_call_body(call, where, problems, files)
     check_save_to(call, where, problems, files)
+
+
+def _valid_source(source: str) -> bool:
+    kind, _, name = source.partition(":")
+    return bool(name.strip()) if kind in ("header", "cookie") and source.startswith(kind + ":") else valid_path(source)
 
 
 def validate_plan(plan, env: dict, files=None) -> list[str]:
@@ -114,22 +79,34 @@ def validate_plan(plan, env: dict, files=None) -> list[str]:
         seen.add(sid)
         _check_call(step.get("call"), f"{where}.call", env, problems, files)
         extract = step.get("extract", {})
-        if not isinstance(extract, dict) or not all(isinstance(p, str) and valid_path(p) for p in extract.values()):
-            problems.append(f"{where}.extract must map variable names to dotted paths")
+        if not isinstance(extract, dict) or not all(isinstance(p, str) and _valid_source(p) for p in extract.values()):
+            problems.append(f"{where}.extract must map variable names to dotted paths, 'header:NAME' or 'cookie:NAME'")
         expect = step.get("expect", {})
         if not isinstance(expect, dict):
             problems.append(f"{where}.expect must be an object")
             continue
-        status = expect.get("status")
-        if status is not None and (isinstance(status, bool) or not isinstance(status, int)):
-            problems.append(f"{where}.expect.status must be an integer")
+        if "status" in expect:
+            problems += status_problems(expect["status"], f"{where}.expect.status")
         json_expect = expect.get("json", {})
         if not isinstance(json_expect, dict):
             problems.append(f"{where}.expect.json must be an object")
         else:
-            for p in json_expect:
+            for p, exp in json_expect.items():
                 if not valid_path(p):
                     problems.append(f"{where}.expect.json: invalid path '{p}'")
+                problems += expectation_problems(exp, f"{where}.expect.json.{p}")
+        headers_expect = expect.get("headers", {})
+        if not isinstance(headers_expect, dict):
+            problems.append(f"{where}.expect.headers must be an object of header name -> expectation")
+        else:
+            for name, exp in headers_expect.items():
+                problems += expectation_problems(exp, f"{where}.expect.headers.{name}")
+        problems += expectation_problems(expect.get("text"), f"{where}.expect.text")
+        max_ms = expect.get("maxMs")
+        if "maxMs" in expect and (isinstance(max_ms, bool) or not isinstance(max_ms, int) or max_ms < 0):
+            problems.append(f"{where}.expect.maxMs must be a whole number of milliseconds")
+    if "cookies" in plan and not isinstance(plan["cookies"], bool):
+        problems.append("cookies must be true or false")
     cleanup = plan.get("cleanup", [])
     if not isinstance(cleanup, list):
         problems.append("cleanup must be a list")
@@ -174,8 +151,9 @@ def _is_json(text: str) -> bool:
 class _Session:
     """Per-run state: env, variables."""
 
-    def __init__(self, app, env, files):
+    def __init__(self, app, env, files, cookies=False):
         self.app, self.env, self.variables = app, env, {}
+        self.jar = CookieJar() if cookies else None  # per run, never saved
         self.base, self.roots = files
         self.timeout = app.get("timeoutSeconds", 30)
 
@@ -204,7 +182,33 @@ class _Session:
 
     def send(self, req, role) -> dict:
         return http.send(self.env, self.timeout, req["method"], req["path"], req["query"], req["headers"], req["body"], self.auth(role),
-                         form=req["form"], multipart=req["multipart"], text=req["text"], file=req["file"], save_to=req["saveTo"])
+                         form=req["form"], multipart=req["multipart"], text=req["text"], file=req["file"], save_to=req["saveTo"], jar=self.jar)
+
+
+def _same_host_path(location: str, base_url: str) -> str:
+    """A Location on this app's baseUrl becomes a path usable in call.path; anything else is kept as is."""
+    if location.startswith(base_url) and location[len(base_url):len(base_url) + 1] in ("/", "?", "#"):
+        return location[len(base_url):]
+    return location
+
+
+def _extract(source: str, resp: dict, headers: dict, is_json: bool, env: dict) -> tuple[bool, object]:
+    kind, _, name = source.partition(":")
+    if source.startswith("header:"):
+        value = headers.get(name.strip().lower())
+        return (False, None) if value is None else (True, _same_host_path(value, env["baseUrl"]))
+    if source.startswith("cookie:"):
+        value = resp["cookies"].get(name.strip())
+        return (False, None) if value is None else (True, value)
+    return lookup(resp["body"], source) if is_json else (False, None)
+
+
+def _extract_missing(source: str) -> str:
+    if source.startswith("header:"):
+        return f"extract header '{source[7:]}' not in response"
+    if source.startswith("cookie:"):
+        return f"extract cookie '{source[7:]}' not set by this response"
+    return f"extract path '{source}' not found in response"
 
 
 def _run_step(step, s: _Session) -> dict:
@@ -233,9 +237,9 @@ def _run_step(step, s: _Session) -> dict:
         asserts.append({"target": "status", "expected": "2xx", "actual": resp["status"], "passed": ok,
                         "message": "" if ok else f"expected 2xx, got {resp['status']}"})
     else:
-        ok = resp["status"] == want
+        ok = status_ok(want, resp["status"])
         asserts.append({"target": "status", "expected": want, "actual": resp["status"], "passed": ok,
-                        "message": "" if ok else f"expected {want}, got {resp['status']}"})
+                        "message": "" if ok else f"expected {_show(want)}, got {resp['status']}"})
     if auth_rejected(resp) and call.get("as") and asserts[0]["message"]:
         asserts[0]["message"] += f" ({token_hint(s.app, s.env, call['as'])})"
     for path, expectation in expect.get("json", {}).items():
@@ -245,14 +249,27 @@ def _run_step(step, s: _Session) -> dict:
         else:
             value, ok, msg = None, False, "response is not JSON"
         asserts.append({"target": path, "expected": expectation, "actual": value, "passed": ok, "message": msg})
-    for name, path in step.get("extract", {}).items():
-        found, value = lookup(resp["body"], path) if is_json else (False, None)
+    headers = {k.lower(): v for k, v in resp["headers"].items()}
+    for name, expectation in expect.get("headers", {}).items():
+        found, value = name.lower() in headers, headers.get(name.lower())
+        ok, msg = check(expectation, found, value)
+        asserts.append({"target": f"header {name}", "expected": expectation, "actual": value, "passed": ok,
+                        "message": "header not in response" if msg == "path not found" else msg})
+    if "text" in expect:
+        ok, msg = check(expect["text"], True, resp["bodyText"])
+        asserts.append({"target": "text", "expected": expect["text"], "actual": resp["bodyText"], "passed": ok, "message": msg})
+    if "maxMs" in expect:
+        ok = resp["durationMs"] <= expect["maxMs"]
+        asserts.append({"target": "maxMs", "expected": expect["maxMs"], "actual": resp["durationMs"], "passed": ok,
+                        "message": "" if ok else f"took {resp['durationMs']}ms, limit {expect['maxMs']}ms"})
+    for name, source in step.get("extract", {}).items():
+        found, value = _extract(source, resp, headers, is_json, s.env)
         if found:
             result["extracted"][name] = value
             s.variables[name] = value
         else:
-            asserts.append({"target": f"extract {name}", "expected": path, "actual": None, "passed": False,
-                            "message": f"extract path '{path}' not found in response"})
+            asserts.append({"target": f"extract {name}", "expected": source, "actual": None, "passed": False,
+                            "message": _extract_missing(source)})
     if all(a["passed"] for a in asserts):
         result["status"] = "passed"
     return result
@@ -310,7 +327,7 @@ def run_plan(plan: dict, app: dict, env_name: str | None = None, on_event=None, 
         save_run(app["name"], result)
         return result
 
-    s = _Session(app, env, files)
+    s = _Session(app, env, files, plan.get("cookies", False))
     failed = False
     for step in plan["steps"]:
         if failed:

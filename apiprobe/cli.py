@@ -278,7 +278,7 @@ def cmd_run(args):
         def show():
             print(f"error [{result['error']['code']}]: {result['error']['message']}", file=sys.stderr)
             print(f"saved: {result['savedTo']}", file=sys.stderr)
-        return result, 2, show
+        return (result if args.full else brief_run(result, args.max_chars)), 2, show
     shown = result if args.full else brief_run(result, args.max_chars)
     return shown, 0 if result["status"] == "passed" else 1, lambda: _print_report(result, args.max_chars)
 

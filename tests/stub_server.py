@@ -77,6 +77,15 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply_bytes(200, BINARY, "application/pdf", {"Content-Disposition": 'attachment; filename="r.pdf"', "ETag": '"v1"', "X-Secret": "hidden"})
         if url.path == "/cookies":
             return self._reply_bytes(200, b'{"ok": true}', "application/json", cookies=["session=SESSIONVALUE; Path=/", "XSRF-TOKEN=XVALUE"])
+        if url.path == "/created":
+            host = self.headers["Host"]
+            return self._reply_bytes(201, b'{"items": [1, 2, 3]}', "application/json", {"Location": f"http://{host}/items/42", "X-Total": "5"})
+        if url.path == "/other-location":
+            return self._reply_bytes(201, b"{}", "application/json", {"Location": "http://elsewhere.test/items/42"})
+        if url.path == "/login-cookie":
+            return self._reply_bytes(200, b'{"ok": true}', "application/json", cookies=["sid=abc123; Path=/"])
+        if url.path == "/need-cookie":
+            return self._reply(200, {"ok": True}) if "sid=abc123" in self.headers.get("Cookie", "") else self._reply(401, {"message": "no session"})
         if url.path == "/protected":
             return self._reply(200, {"ok": True}) if auth.startswith("Bearer tok-") else self._reply(401, {"message": "no token"})
         if url.path == "/slow":

@@ -82,13 +82,14 @@ def _is_text(content_type: str) -> bool:
 
 
 def send(env: dict, timeout: int, method, path, query=None, headers=None, body=None, auth=None, *,
-         form=None, multipart=None, text=None, file=None, save_to=None) -> dict:
+         form=None, multipart=None, text=None, file=None, save_to=None, jar=None) -> dict:
     """Send one request. Any HTTP status comes back as data; only transport errors raise REQUEST_FAILED.
     auth is a config user entry: {"token"} plus at most one of scheme/header/query/cookie (D16); a query-string
     token is masked in the returned and error urls.
     At most one of body/form/multipart/text/file; file paths must already be resolved and checked (body.resolve_file).
     A response that is not text/JSON/XML/HTML/form comes back as a summary body (size, type, sha256), never decoded;
-    save_to (already checked, body.resolve_output) gets the raw bytes of a 2xx response."""
+    save_to (already checked, body.resolve_output) gets the raw bytes of a 2xx response.
+    jar (http.cookiejar.CookieJar) stores and replays the cookies the API sets."""
     url = shown = build_url(env, path, query)
     req_headers = {"Accept": "application/json", **{k: _text(v) for k, v in (headers or {}).items()}}
     data = None
@@ -124,13 +125,17 @@ def send(env: dict, timeout: int, method, path, query=None, headers=None, body=N
     started = time.perf_counter()
     try:
         try:
-            resp = urllib.request.urlopen(request, timeout=timeout, context=context)
+            if jar is None:
+                resp = urllib.request.urlopen(request, timeout=timeout, context=context)
+            else:  # cookies the API sets are kept in jar and sent on later calls
+                opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), urllib.request.HTTPSHandler(context=context))
+                resp = opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as e:
             resp = e  # non-2xx is a normal result
         with resp:
             raw = resp.read()
             status, resp_headers = resp.status, dict(resp.headers.items())
-            cookie_names = [c.split("=", 1)[0].strip() for c in resp.headers.get_all("Set-Cookie") or []]
+            cookies = {n.strip(): v.strip() for n, _, v in (c.split(";")[0].partition("=") for c in resp.headers.get_all("Set-Cookie") or [])}
             content_type = resp.headers.get("Content-Type", "")
     except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError) as e:
         reason = getattr(e, "reason", e)
@@ -155,5 +160,5 @@ def send(env: dict, timeout: int, method, path, query=None, headers=None, body=N
         except json.JSONDecodeError:
             parsed = None
     return {"status": status, "headers": resp_headers, "body": parsed, "bodyText": text, "durationMs": duration, "url": shown,
-            "binary": binary, "cookieNames": cookie_names, "saved": saved}
+            "binary": binary, "cookies": cookies, "saved": saved}
 

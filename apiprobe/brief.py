@@ -27,8 +27,8 @@ def brief_call(resp: dict, header_out=(), path: str | None = None) -> dict:
         return {"status": resp["status"], "durationMs": resp["durationMs"], "url": resp["url"], **pick(resp["body"], path)}
     wanted = {h.lower() for h in header_out}
     headers = {k.lower(): v for k, v in resp["headers"].items() if k.lower() in KEEP_HEADERS or k.lower() in wanted}
-    if resp["cookieNames"] and "set-cookie" not in wanted:  # values are session secrets: names only
-        headers["set-cookie"] = resp["cookieNames"]
+    if resp["cookies"] and "set-cookie" not in wanted:  # values are session secrets: names only
+        headers["set-cookie"] = list(resp["cookies"])
     out = {"status": resp["status"], "headers": headers, "body": resp["body"], "durationMs": resp["durationMs"], "url": resp["url"]}
     if resp["body"] is None:
         out["bodyText"] = resp["bodyText"]

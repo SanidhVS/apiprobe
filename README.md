@@ -101,7 +101,7 @@ Saved in the app repo at `.apiprobe/plans/<slug>.json` so the team can share it.
 }
 ```
 
-Assertions: plain JSON value (deep-equal), `{"exists": true|false}`, `{"contains": x}` (substring or list element). Missing `expect.status` → any 2xx passes. Built-in variables: `{{$uuid}}`, `{{$now}}`. After the first failing step the rest are skipped; cleanup always runs. Full rules are in `skill/SKILL.md`.
+Assertions: plain JSON value (deep-equal) or one-key operators `exists`, `contains`, `matches` (regex), `length`, `type`, `gt`/`gte`/`lt`/`lte`, `in`, `equals` (for a literal object whose only key is an operator name). `expect.status` takes an integer, a list or a class like `"2xx"` (missing → any 2xx); `expect.headers`, `expect.text` and `expect.maxMs` check headers, raw body text and response time. `extract` reads a body path, `"header:Location"` or `"cookie:NAME"`; a plan with `"cookies": true` carries cookies between steps. Built-in variables: `{{$uuid}}`, `{{$now}}`. After the first failing step the rest are skipped; cleanup always runs. Full rules are in `skill/SKILL.md`.
 
 Request bodies: a call carries at most one of `body` (JSON), `form` (urlencoded), `multipart` (text, `{"json": X}` and `{"file": path}` parts), `text` or `file` (raw). Upload files must live inside the app's `repoPath` or the plan's folder (put fixtures in `<repo>/.apiprobe/files/`); anything else is rejected before a request is sent. Runs record file name, size and type, never file bytes.
 

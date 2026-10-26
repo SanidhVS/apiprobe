@@ -209,6 +209,9 @@ class RunOutputTests(WorkCase):
         bad = {"title": "t", "steps": [{"id": "s", "call": {"method": "GET", "path": "/echo", "as": "ghost"}}]}
         code, out = self.jmain("run", self.write_plan("bad.json", bad))
         self.assertEqual((code, out["status"], out["steps"]), (2, "error", []))
+        self.assertNotIn("planPath", out)  # compact like any other run
+        _, full = self.jmain("run", self.write_plan("bad.json", bad), "--full")
+        self.assertIn("planPath", full)
         self.assertIn("ghost", out["error"]["message"])
 
     def test_human_run_output_unchanged_by_default(self):

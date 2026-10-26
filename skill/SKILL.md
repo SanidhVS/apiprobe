@@ -113,8 +113,9 @@ Field rules:
 - Body: at most one of `body` (any JSON), `form` (flat object; list value repeats the key), `multipart`, `text` (string; `headers` sets the type), `file` (path; raw bytes).
 - `multipart`: field → string, `{"json": X}`, `{"file": "files/a.pdf", "contentType"?, "filename"?}`, or a list of these (repeats the field). Example: `"multipart": {"title": "T {{$uuid}}", "doc": {"file": "files/c.pdf"}}`.
 - File paths are relative to the plan's folder. Keep fixtures in `<repo>/.apiprobe/files/`; ask before creating large files or using real documents. Paths outside the repo (or plan folder) fail validation, nothing is sent. Runs record file name, size and type, never bytes.
-- `extract`: `{varName: dottedPath}`; path not found → step fails.
-- `expect.status`: integer; omitted → any 2xx passes. `expect.json`: `{dottedPath: expectation}`.
+- `extract`: `{varName: source}`; source is a dotted body path, `"header:Location"` or `"cookie:XSRF-TOKEN"`; not found → step fails. A Location on the app's own baseUrl becomes a path, so `"path": "{{loc}}"` works.
+- `expect.status`: integer, list (`[200, 204]`) or class (`"2xx"`); omitted → any 2xx passes. `expect.json`: `{dottedPath: expectation}`. Also `expect.headers` (`{name: expectation}`, case-insensitive), `expect.text` (one expectation on the raw body) and `expect.maxMs`.
+- Plan-level `"cookies": true` keeps cookies the API sets (session, CSRF) for later steps of that run; off by default.
 - Binary responses (PDF, images, zips…) are never decoded: the body becomes `{"binary": true, "bytes", "contentType", "sha256"}`, so assert on those (`"bytes": {"exists": true}`, `"contentType": "application/pdf"`). `call.saveTo: "out/r.pdf"` also writes the bytes of a 2xx response; same folder rule as uploads (inside repo or plan folder; use `<repo>/.apiprobe/out/`). Variables work in `saveTo`.
 - `source`: where the expectation came from (`File.cs:line`).
 - `manualChecks[]`: `sql`, `expect`, `why`. Variables are filled in; never executed.
@@ -124,7 +125,7 @@ Variables: `{{name}}` in `path`, `query`/`headers` values, `body`/`form`/`multip
 
 Dotted paths: `data.token`, `data.items[0].id`, `items[2]`, `[0].id` (root array), `""` (whole body). Case-sensitive.
 
-Assertions (`expect.json` values):
+Assertions (`expect.json` and `expect.headers` values, `expect.text`):
 
 | Expectation form | Passes when |
 |---|---|
@@ -132,8 +133,14 @@ Assertions (`expect.json` values):
 | `{"exists": true}` | path found (value may be `null`) |
 | `{"exists": false}` | path not found |
 | `{"contains": x}` | value is a string containing `x`, or a list with an element deep-equal to `x` |
+| `{"matches": "regex"}` | string value where `re.search` finds the regex |
+| `{"length": N}` or `{"length": {"gte": 1}}` | string/list/object length equals N, or passes a nested `gt`/`gte`/`lt`/`lte` |
+| `{"type": "string"}` | JSON type: string, number, integer, boolean, array, object, null |
+| `{"gt": N}` `gte` `lt` `lte` | number comparison |
+| `{"in": [a, b]}` | value deep-equals one list element |
+| `{"equals": X}` | deep-equals `X`; use it for a literal object whose only key is an operator name (e.g. `{"equals": {"type": "NDA"}}`) |
 
-An object whose only key is `exists` or `contains` is an operator; any other object is a plain value. After the first failing step, remaining steps are skipped.
+An object whose only key is one of these operator names is an operator; any other object is a plain value. After the first failing step, remaining steps are skipped.
 
 ## Quick command reference
 
