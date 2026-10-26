@@ -12,7 +12,7 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 2. Never change an expectation after a run to make it pass without asking the user.
 3. Every expectation has a `source` (File:line). If you could not find one, label it "assumption" in the plan table.
 4. Never run a plan before the user approves it.
-5. Auth is bearer tokens only. Never ask for, accept or store usernames or passwords; if the user offers one, say a token is enough. When a role has no token, or you get USER_NOT_CONFIGURED, TOKEN_EXPIRED or a 401 with a "token ... may be expired" hint, ask the user to generate a fresh token for that role and either paste it here (you write it into the config field the error names) or paste it into that field themselves (keeps it out of the chat). Never write a token anywhere else: not in plans, the repo, or your replies.
+5. Auth is token-only. Never ask for, accept or store usernames or passwords; if the user offers one, say a token is enough. For Basic auth the user pastes the pre-encoded value into the config file themselves. When a role has no token, or you get USER_NOT_CONFIGURED, TOKEN_EXPIRED or a 401 (or empty 403) with a "token ... may be expired" hint, ask the user to generate a fresh token for that role and either paste it here (you write it into the config field the error names) or paste it into that field themselves (keeps it out of the chat). Never write a token anywhere else: not in plans, the repo, or your replies.
 6. Never add a production URL to a config. If the user asks, refuse and explain.
 7. Write endpoints (POST/PUT/PATCH/DELETE) are not "done" without manualChecks or an explicit note that DB state was not checked.
 8. Always use `--json` when you need to read output; show the user the human summary.
@@ -29,6 +29,7 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 - `apiprobe find "<words>" --json`, then `apiprobe show "<METHOD /path>" --json`.
 - Endpoint in code but missing/different in spec (ENDPOINT_NOT_FOUND, old fields) → the running API is stale; ask the user to rebuild/restart it, then re-run `find`/`show`.
 - `show` lists each accepted request content type with its fields (`file` = upload). Pick the plan body key: `application/json` → `body`, `application/x-www-form-urlencoded` → `form`, `multipart/form-data` → `multipart`, `text/*`/XML → `text`, `application/octet-stream` → `file`.
+- `show` prints `Auth:` for the endpoint. The user's config entry must match it: bearer → `{"token"}`; basic → add `"scheme": "Basic"`; apiKey → add `"header"`, `"query"` or `"cookie"` with the scheme's name. No `Auth:` line → find the type in the code (`APP_SETUP.md` lists what to grep); unsure → ask.
 - Read the controller action, the request handler, any validator, and the entities it writes.
 - More than one plausible endpoint, or unclear intent → stop and ask with the candidates listed.
 
@@ -41,7 +42,7 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 - Write `<repo>/.apiprobe/plans/<slug>.json` following the plan format below.
 - Show the user a table: step | call | as | expectations | source.
 - List separately: calls with side effects outside the DB (emails, payroll, jobs), deletes, and assumptions.
-- Include negative cases when relevant: validation (missing/partial fields), access (user without rights → 401/403/empty), not-found; for uploads also wrong content type (415), missing file part, oversized file (413), disallowed extension.
+- Include negative cases when relevant: validation (missing/partial fields), access (user without rights → 401/403/empty), not-found, wrong/missing API key (401/403) when the endpoint uses one; for uploads also wrong content type (415), missing file part, oversized file (413), disallowed extension.
 - Ask: "Run this plan?" Wait.
 
 ### 5. Run

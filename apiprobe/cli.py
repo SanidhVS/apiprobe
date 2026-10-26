@@ -90,15 +90,29 @@ def _body_args(args, app) -> dict:
 
 # ---------- commands: each returns (result, exit_code, human_printer) ----------
 
+def _auth_label(s: dict) -> str:
+    if s["type"] == "http":
+        return f"http {s.get('scheme', '?')}"
+    if s["type"] == "apiKey":
+        return f"{s.get('param')} {s.get('in')} (apiKey)"
+    return s["type"] or f"{s['id']} (not defined in components.securitySchemes)"
+
+
 def cmd_app(args):
     apps = config.list_apps()
     try:
-        detected = _app(args)["name"]
+        app = _app(args)
+        detected = app["name"]
     except ApiProbeError as e:
         if e.code != "APP_NOT_FOUND" or args.app:
             raise
-        detected = None
+        app = detected = None
     result = {"detected": detected, "apps": apps}
+    if app and not args.no_spec:
+        try:  # best effort: the API may not be running
+            result["securitySchemes"] = spec.security_schemes(spec.load_spec(app, config.resolve_env(app, args.env)))
+        except ApiProbeError:
+            pass
 
     def show():
         if not apps:
@@ -112,12 +126,14 @@ def cmd_app(args):
                 print(f"    ! {a['error']}")
         if not detected:
             print("No app detected for this folder (pass --app NAME).")
+        for s in result.get("securitySchemes", {}).values():
+            print(f"spec auth: {_auth_label(s)}")
     return result, 0, show
 
 
 def cmd_init(args):
     path = config.init_app(args.name, args.repo or str(Path.cwd()))
-    return {"path": str(path)}, 0, lambda: print(f"Wrote {path}\nSet baseUrl/specUrl, then replace each CHANGE_ME with a bearer token for that role.")
+    return {"path": str(path)}, 0, lambda: print(f"Wrote {path}\nSet baseUrl/specUrl, then replace each CHANGE_ME with a token for that role.")
 
 
 def cmd_find(args):
@@ -158,6 +174,8 @@ def cmd_show(args):
             for p in d["parameters"]:
                 enum = f"  enum: {json.dumps(p['enum'])}" if p.get("enum") else ""
                 print(f"    {p['name']} ({p['in']}{', required' if p['required'] else ''})  {p['type']}{enum}")
+        if d["security"]:
+            print("Auth: " + " | ".join(" + ".join(_auth_label(s) for s in alt) for alt in d["security"]))
         if d["requestBody"]:
             rb = d["requestBody"]
             shown = []  # preferred type first; types with identical fields print once
@@ -186,16 +204,16 @@ def cmd_call(args):
         except json.JSONDecodeError as e:
             raise ApiProbeError("PLAN_INVALID", f"--body is not valid JSON: {e.msg}")
     env = config.resolve_env(app, args.env)
-    token = config.get_user(app, env, args.as_)["token"] if args.as_ else None
+    auth = config.get_user(app, env, args.as_) if args.as_ else None
     resp = http.send(env, app.get("timeoutSeconds", 30), args.method, args.path,
-                     _kv(args.query, "--query"), _kv(args.header, "--header"), token=token, **sent)
+                     _kv(args.query, "--query"), _kv(args.header, "--header"), auth=auth, **sent)
     code = 0 if 200 <= resp["status"] < 300 else 1
 
     def show():
         print(f"{args.method.upper()} {resp['url']}  →  {resp['status']}  {resp['durationMs']}ms")
         if resp["bodyText"]:
             print(_truncate(_body_text(resp["body"]) if resp["body"] is not None else resp["bodyText"]))
-        if resp["status"] == 401 and args.as_:
+        if runner.auth_rejected(resp) and args.as_:
             print(f"hint: {runner.token_hint(app, env, args.as_)}", file=sys.stderr)
     return resp, code, show
 
@@ -275,7 +293,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"apiprobe {__version__}")
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    sub.add_parser("app", parents=[common], help="show detected app and all known apps").set_defaults(func=cmd_app)
+    p = sub.add_parser("app", parents=[common], help="show detected app and all known apps")
+    p.add_argument("--no-spec", action="store_true", help="skip fetching the spec for its auth schemes")
+    p.set_defaults(func=cmd_app)
 
     p = sub.add_parser("init", parents=[common], help="write a config template for a new app")
     p.add_argument("name")

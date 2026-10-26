@@ -12,6 +12,9 @@ from .body import guess_type, iter_parts
 from .errors import ApiProbeError
 
 
+MASK = "***"
+
+
 def _text(v) -> str:
     return v if isinstance(v, str) else json.dumps(v)
 
@@ -68,11 +71,17 @@ def _encode_other(form, multipart, text, file) -> tuple[bytes, str, bool] | None
     return None
 
 
-def send(env: dict, timeout: int, method, path, query=None, headers=None, body=None, token=None, *,
+def _add_key(url: str, name: str, value: str) -> str:
+    return url + ("&" if "?" in url else "?") + f"{urllib.parse.quote_plus(name)}={value}"
+
+
+def send(env: dict, timeout: int, method, path, query=None, headers=None, body=None, auth=None, *,
          form=None, multipart=None, text=None, file=None) -> dict:
     """Send one request. Any HTTP status comes back as data; only transport errors raise REQUEST_FAILED.
+    auth is a config user entry: {"token"} plus at most one of scheme/header/query/cookie (D16); a query-string
+    token is masked in the returned and error urls.
     At most one of body/form/multipart/text/file; file paths must already be resolved and checked (body.resolve_file)."""
-    url = build_url(env, path, query)
+    url = shown = build_url(env, path, query)
     req_headers = {"Accept": "application/json", **{k: _text(v) for k, v in (headers or {}).items()}}
     data = None
     if body is not None:
@@ -85,8 +94,17 @@ def send(env: dict, timeout: int, method, path, query=None, headers=None, body=N
             for k in have:
                 del req_headers[k]
             req_headers["Content-Type"] = ctype
-    if token:
-        req_headers["Authorization"] = f"Bearer {token}"
+    if auth:
+        token = auth["token"]
+        if "query" in auth:
+            url, shown = _add_key(url, auth["query"], urllib.parse.quote_plus(token)), _add_key(url, auth["query"], MASK)
+        elif "header" in auth:
+            req_headers[auth["header"]] = token
+        elif "cookie" in auth:
+            have = next((k for k in req_headers if k.lower() == "cookie"), "Cookie")
+            req_headers[have] = "; ".join(filter(None, [req_headers.get(have), f"{auth['cookie']}={token}"]))
+        else:
+            req_headers["Authorization"] = f"{auth.get('scheme', 'Bearer')} {token}"
     request = urllib.request.Request(url, data=data, headers=req_headers, method=method.upper())
 
     context = None
@@ -106,7 +124,7 @@ def send(env: dict, timeout: int, method, path, query=None, headers=None, body=N
             status, resp_headers = resp.status, dict(resp.headers.items())
     except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError) as e:
         reason = getattr(e, "reason", e)
-        raise ApiProbeError("REQUEST_FAILED", f"{method.upper()} {url} failed: {reason}. Is the API running, and is baseUrl right in the app config?")
+        raise ApiProbeError("REQUEST_FAILED", f"{method.upper()} {shown} failed: {reason}. Is the API running, and is baseUrl right in the app config?")
     duration = round((time.perf_counter() - started) * 1000)
 
     text = raw.decode("utf-8", errors="replace")
@@ -114,5 +132,5 @@ def send(env: dict, timeout: int, method, path, query=None, headers=None, body=N
         parsed = json.loads(text) if text.strip() else None
     except json.JSONDecodeError:
         parsed = None
-    return {"status": status, "headers": resp_headers, "body": parsed, "bodyText": text, "durationMs": duration, "url": url}
+    return {"status": status, "headers": resp_headers, "body": parsed, "bodyText": text, "durationMs": duration, "url": shown}
 

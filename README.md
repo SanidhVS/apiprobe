@@ -68,7 +68,8 @@ Or just ask Claude Code: "test the create leave endpoint" — the skill sets up 
 ```
 
 - `specUrl`: `/path` → joined to `baseUrl`; `http...` → as is; otherwise a local file (relative to `repoPath`). OpenAPI 3.x JSON only.
-- Auth is bearer tokens only (`Authorization: Bearer <token>`); apiprobe never handles usernames or passwords. Get a token from your app's login endpoint (e.g. in Swagger UI) or the browser devtools, and paste it in.
+- Auth is token-only; apiprobe never handles usernames or passwords. Default is `Authorization: Bearer <token>`. Add one of `"scheme": "Basic"` (paste the base64 `user:password` value yourself), `"header": "X-Api-Key"`, `"query": "api_key"` (masked as `***` in output) or `"cookie": "session"` to a user for other schemes. Get a token from your app's login endpoint (e.g. in Swagger UI) or the browser devtools, and paste it in.
+- `apiprobe show` prints the endpoint's `Auth:` requirement; `apiprobe app --json` lists the spec's security schemes (`--no-spec` skips the fetch).
 - A `CHANGE_ME` token only errors when a command or plan actually uses that role. A JWT past its `exp` stops the run with TOKEN_EXPIRED before any request; a 401 shows a "token may be expired" hint. Either way: paste a fresh token and rerun.
 
 ## Plan file
@@ -121,7 +122,7 @@ Global flags (after the command): `--app NAME`, `--env NAME`, `--json`.
 
 ## Security notes
 
-- Configs hold **plaintext bearer tokens** (no passwords). They live in your home folder, never in a repo. Use dev/test accounts only; short-lived tokens limit the damage if one leaks.
+- Configs hold **plaintext tokens** (no passwords). They live in your home folder, never in a repo. Use dev/test accounts only; short-lived tokens limit the damage if one leaks.
 - A token you paste into the AI chat ends up in the conversation transcript. To keep it out, paste it straight into the config file instead.
 - Only put dev/test environments in configs. **Never prod.** Plans contain only paths, never full URLs, so a plan can only reach hosts that are in your config.
 - Responses (which may contain dev data) are read by the AI assistant. If your dev DB holds copies of real personal data, keep that in mind.

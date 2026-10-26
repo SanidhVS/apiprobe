@@ -11,6 +11,9 @@ from .errors import ApiProbeError
 
 PLACEHOLDER = "CHANGE_ME"
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_AUTH_PLACES = ("scheme", "header", "query", "cookie")
+_HEADER_NAME_RE = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def home() -> Path:
@@ -91,8 +94,28 @@ def _validate(cfg, path: Path) -> list[str]:
             problems.append(f"field '{where}.users' must be an object")
             continue
         for role, user in users.items():
-            if not isinstance(user, dict) or not isinstance(user.get("token"), str):
-                problems.append(f"field '{where}.users.{role}' must be {{\"token\": \"...\"}} (username/password is not supported)")
+            problems += _user_problems(user, f"{where}.users.{role}")
+    return problems
+
+
+def _user_problems(user, where: str) -> list[str]:
+    if not isinstance(user, dict) or not isinstance(user.get("token"), str):
+        return [f"field '{where}' must be {{\"token\": \"...\"}} (username/password is not supported)"]
+    if user.keys() & {"username", "password"}:
+        return [f"field '{where}' has username/password, which is not supported; keep only the token"]
+    problems = []
+    if _CONTROL_RE.search(user["token"]):
+        problems.append(f"field '{where}.token' contains a line break or control character; paste only the token")
+    given = [k for k in _AUTH_PLACES if k in user]
+    if len(given) > 1:
+        problems.append(f"field '{where}' has {' and '.join(given)}; use at most one of {', '.join(_AUTH_PLACES)}")
+    for k in given:
+        v = user[k]
+        ok = isinstance(v, str) and (_HEADER_NAME_RE.fullmatch(v) if k != "query" else bool(v))
+        if k == "scheme":
+            ok = isinstance(v, str) and v.isalnum()
+        if not ok:
+            problems.append(f"field '{where}.{k}' must be a non-empty {'word' if k == 'scheme' else 'name'} string, got {json.dumps(v)}")
     return problems
 
 

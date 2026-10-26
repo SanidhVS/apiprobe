@@ -148,6 +148,11 @@ def _roles(plan: dict) -> set:
 
 # ---------- execution ----------
 
+def auth_rejected(resp: dict) -> bool:
+    """401, or a 403 with no body at all (many APIs answer a bad token that way)."""
+    return resp["status"] == 401 or (resp["status"] == 403 and not resp["bodyText"].strip())
+
+
 def token_hint(app: dict, env: dict, role: str) -> str:
     return (f"token for role '{role}' may be expired or invalid: generate a new one and paste it into "
             f"field 'environments.{env['name']}.users.{role}.token' in {app['configPath']}")
@@ -173,8 +178,8 @@ class _Session:
         self.base, self.roots = files
         self.timeout = app.get("timeoutSeconds", 30)
 
-    def token(self, role):
-        return get_user(self.app, self.env, role)["token"] if role else None
+    def auth(self, role):
+        return get_user(self.app, self.env, role) if role else None
 
     def prepare(self, call) -> dict:
         """Substitute variables; raises VAR_UNDEFINED before anything is sent."""
@@ -195,7 +200,7 @@ class _Session:
         return out
 
     def send(self, req, role) -> dict:
-        return http.send(self.env, self.timeout, req["method"], req["path"], req["query"], req["headers"], req["body"], self.token(role),
+        return http.send(self.env, self.timeout, req["method"], req["path"], req["query"], req["headers"], req["body"], self.auth(role),
                          form=req["form"], multipart=req["multipart"], text=req["text"], file=req["file"])
 
 
@@ -226,7 +231,7 @@ def _run_step(step, s: _Session) -> dict:
         ok = resp["status"] == want
         asserts.append({"target": "status", "expected": want, "actual": resp["status"], "passed": ok,
                         "message": "" if ok else f"expected {want}, got {resp['status']}"})
-    if resp["status"] == 401 and call.get("as") and asserts[0]["message"]:
+    if auth_rejected(resp) and call.get("as") and asserts[0]["message"]:
         asserts[0]["message"] += f" ({token_hint(s.app, s.env, call['as'])})"
     for path, expectation in expect.get("json", {}).items():
         if is_json:

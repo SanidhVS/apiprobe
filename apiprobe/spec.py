@@ -204,6 +204,25 @@ def _content(spec, content: dict | None):
     return {"contentType": ct, "fields": _flatten(spec, content[ct].get("schema"))}
 
 
+def _scheme(spec: dict, key: str) -> dict:
+    s = _deref(spec, ((spec.get("components") or {}).get("securitySchemes") or {}).get(key))
+    out = {"id": key, "type": s.get("type")}
+    for src, dst in (("scheme", "scheme"), ("in", "in"), ("name", "param"), ("bearerFormat", "bearerFormat")):
+        if src in s:
+            out[dst] = s[src].lower() if src == "scheme" and isinstance(s[src], str) else s[src]
+    return out
+
+
+def security_schemes(spec: dict) -> dict:
+    return {k: _scheme(spec, k) for k in (spec.get("components") or {}).get("securitySchemes") or {}}
+
+
+def security(spec: dict, op: dict) -> list[list[dict]]:
+    """The operation's effective security: alternatives (any one works), each a list of schemes (all needed)."""
+    reqs = op["security"] if "security" in op else spec.get("security") or []  # op-level [] means no auth
+    return [[_scheme(spec, k) for k in req] for req in reqs if isinstance(req, dict)]
+
+
 def describe(spec: dict, method: str, path: str) -> dict:
     method = method.upper()
     template = _match_path(spec, path)
@@ -236,4 +255,5 @@ def describe(spec: dict, method: str, path: str) -> dict:
         responses[code] = {"description": r.get("description"), **(_content(spec, r.get("content")) or {})}
 
     return {"method": method, "path": template, "summary": op.get("summary"), "operationId": op.get("operationId"),
-            "tags": op.get("tags", []), "parameters": list(params.values()), "requestBody": body, "responses": responses}
+            "tags": op.get("tags", []), "parameters": list(params.values()), "requestBody": body, "responses": responses,
+            "security": security(spec, op)}
