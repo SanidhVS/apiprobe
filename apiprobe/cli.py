@@ -7,6 +7,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import __version__, config, http, runner, spec
+from .body import BODY_KEYS, resolve_file
 from .errors import ApiProbeError
 
 BODY_LIMIT = 1500
@@ -39,6 +40,52 @@ def _kv(pairs, flag) -> dict:
         k, v = pair.split("=", 1)
         out[k] = v
     return out
+
+
+def _multi(pairs, flag) -> dict:
+    """k=v pairs; a repeated key becomes a list."""
+    out = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise ApiProbeError("PLAN_INVALID", f"{flag} expects k=v, got '{pair}'")
+        k, v = pair.split("=", 1)
+        out[k] = [*out[k], v] if isinstance(out.get(k), list) else [out[k], v] if k in out else v
+    return out
+
+
+def _part(value: str, where: str, base, roots):
+    """--part value: plain text, or @path[;type=mime][;filename=x] for a file part."""
+    if not value.startswith("@"):
+        return value
+    path, *opts = value[1:].split(";")
+    part = {"file": str(resolve_file(path, where, base, roots))}
+    for opt in opts:
+        key, _, val = opt.partition("=")
+        if key not in ("type", "filename") or not val:
+            raise ApiProbeError("PLAN_INVALID", f"{where}: expected ';type=MIME' or ';filename=NAME' after the path, got ';{opt}'")
+        part["contentType" if key == "type" else "filename"] = val
+    return part
+
+
+def _body_args(args, app) -> dict:
+    """Body flags -> http.send keywords; files must sit inside the app repo or the current folder (D15)."""
+    given = {"body": args.body, "form": args.form, "multipart": args.part, "text": args.text, "file": args.file}
+    used = [k for k in BODY_KEYS if given[k] is not None]
+    if len(used) > 1:
+        raise ApiProbeError("PLAN_INVALID", f"use only one body flag, got {', '.join('--' + ('part' if k == 'multipart' else k) for k in used)}")
+    base, roots = Path.cwd(), [app.get("repoPath"), Path.cwd()]
+    if args.form:
+        return {"form": _multi(args.form, "--form")}
+    if args.part:
+        return {"multipart": {k: [_part(x, f"--part {k}", base, roots) for x in v] if isinstance(v, list) else _part(v, f"--part {k}", base, roots)
+                              for k, v in _multi(args.part, "--part").items()}}
+    if args.text is not None:
+        if args.text.startswith("@"):
+            return {"text": resolve_file(args.text[1:], "--text", base, roots).read_text(encoding="utf-8-sig")}
+        return {"text": args.text}
+    if args.file is not None:
+        return {"file": str(resolve_file(args.file.removeprefix("@"), "--file", base, roots))}
+    return {}
 
 
 # ---------- commands: each returns (result, exit_code, human_printer) ----------
@@ -113,8 +160,12 @@ def cmd_show(args):
                 print(f"    {p['name']} ({p['in']}{', required' if p['required'] else ''})  {p['type']}{enum}")
         if d["requestBody"]:
             rb = d["requestBody"]
-            print(f"Request body ({rb['contentType']}{', required' if rb['required'] else ''}):")
-            _print_fields(rb["fields"])
+            shown = []  # preferred type first; types with identical fields print once
+            for ct in sorted(rb["contentTypes"] or [rb], key=lambda c: c["contentType"] != rb["contentType"]):
+                if ct["fields"] not in shown:
+                    shown.append(ct["fields"])
+                    print(f"Request body ({ct['contentType']}{', required' if rb['required'] else ''}):")
+                    _print_fields(ct["fields"])
         print("Responses:")
         for code, r in d["responses"].items():
             print(f"  {code} {r['description'] or ''}" + (f"  ({r['contentType']})" if r.get("contentType") else ""))
@@ -124,20 +175,20 @@ def cmd_show(args):
 
 def cmd_call(args):
     _check_path(args.path, "PLAN_INVALID")
-    body = None
+    app = _app(args)
+    sent = _body_args(args, app)
     if args.body is not None:
         try:
             raw = Path(args.body[1:]).read_text(encoding="utf-8-sig") if args.body.startswith("@") else args.body
-            body = json.loads(raw)
+            sent = {"body": json.loads(raw)}
         except OSError as e:
             raise ApiProbeError("PLAN_INVALID", f"--body file could not be read: {e}")
         except json.JSONDecodeError as e:
             raise ApiProbeError("PLAN_INVALID", f"--body is not valid JSON: {e.msg}")
-    app = _app(args)
     env = config.resolve_env(app, args.env)
     token = config.get_user(app, env, args.as_)["token"] if args.as_ else None
     resp = http.send(env, app.get("timeoutSeconds", 30), args.method, args.path,
-                     _kv(args.query, "--query"), _kv(args.header, "--header"), body, token)
+                     _kv(args.query, "--query"), _kv(args.header, "--header"), token=token, **sent)
     code = 0 if 200 <= resp["status"] < 300 else 1
 
     def show():
@@ -244,6 +295,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("--as", dest="as_", metavar="ROLE", help="user role from the config")
     p.add_argument("--body", metavar="JSON|@file")
+    p.add_argument("--form", action="append", metavar="k=v", help="urlencoded form field (repeat a key for a list)")
+    p.add_argument("--part", action="append", metavar="k=v|k=@path[;type=MIME][;filename=NAME]", help="multipart field or file")
+    p.add_argument("--text", metavar="STR|@file", help="raw text body")
+    p.add_argument("--file", metavar="@path", help="raw file body")
     p.add_argument("--query", action="append", metavar="k=v")
     p.add_argument("--header", action="append", metavar="k=v")
     p.set_defaults(func=cmd_call)

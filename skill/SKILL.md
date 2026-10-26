@@ -27,6 +27,8 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 
 ### 2. Understand the target
 - `apiprobe find "<words>" --json`, then `apiprobe show "<METHOD /path>" --json`.
+- Endpoint in code but missing/different in spec (ENDPOINT_NOT_FOUND, old fields) → the running API is stale; ask the user to rebuild/restart it, then re-run `find`/`show`.
+- `show` lists each accepted request content type with its fields (`file` = upload). Pick the plan body key: `application/json` → `body`, `application/x-www-form-urlencoded` → `form`, `multipart/form-data` → `multipart`, `text/*`/XML → `text`, `application/octet-stream` → `file`.
 - Read the controller action, the request handler, any validator, and the entities it writes.
 - More than one plausible endpoint, or unclear intent → stop and ask with the candidates listed.
 
@@ -39,7 +41,7 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 - Write `<repo>/.apiprobe/plans/<slug>.json` following the plan format below.
 - Show the user a table: step | call | as | expectations | source.
 - List separately: calls with side effects outside the DB (emails, payroll, jobs), deletes, and assumptions.
-- Include negative cases when relevant: validation (missing/partial fields), access (user without rights → 401/403/empty), not-found.
+- Include negative cases when relevant: validation (missing/partial fields), access (user without rights → 401/403/empty), not-found; for uploads also wrong content type (415), missing file part, oversized file (413), disallowed extension.
 - Ask: "Run this plan?" Wait.
 
 ### 5. Run
@@ -106,14 +108,17 @@ Group findings:
 Field rules:
 - `title` required. `environment` optional (overrides config default; `--env` overrides both).
 - `steps[].id` required, unique, `[a-z0-9_]+`.
-- `call.method` GET/POST/PUT/PATCH/DELETE. `call.path` must start with `/` — absolute URLs are rejected. `call.as` is a role from the config (omit → no auth header). `query`, `headers` are objects; `body` is any JSON.
+- `call.method` GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS. `call.path` must start with `/` — absolute URLs are rejected. `call.as` is a role from the config (omit → no auth header). `query`, `headers` are objects.
+- Body: at most one of `body` (any JSON), `form` (flat object; list value repeats the key), `multipart`, `text` (string; `headers` sets the type), `file` (path; raw bytes).
+- `multipart`: field → string, `{"json": X}`, `{"file": "files/a.pdf", "contentType"?, "filename"?}`, or a list of these (repeats the field). Example: `"multipart": {"title": "T {{$uuid}}", "doc": {"file": "files/c.pdf"}}`.
+- File paths are relative to the plan's folder. Keep fixtures in `<repo>/.apiprobe/files/`; ask before creating large files or using real documents. Paths outside the repo (or plan folder) fail validation, nothing is sent. Runs record file name, size and type, never bytes.
 - `extract`: `{varName: dottedPath}`; path not found → step fails.
 - `expect.status`: integer; omitted → any 2xx passes. `expect.json`: `{dottedPath: expectation}`.
 - `source`: where the expectation came from (`File.cs:line`).
 - `manualChecks[]`: `sql`, `expect`, `why`. Variables are filled in; never executed.
 - `cleanup[]`: same shape as `call`. Always runs, even after failure; calls with undefined variables are skipped.
 
-Variables: `{{name}}` in `path`, `query`/`headers` values, `body`, `cleanup`, `manualChecks[].sql` (not in `expect`). A string that is exactly `{{name}}` keeps the value's type. Built-ins: `{{$uuid}}` (new per occurrence), `{{$now}}` (UTC ISO-8601). Variables are set by `extract`. Unknown variable → step fails before sending.
+Variables: `{{name}}` in `path`, `query`/`headers` values, `body`/`form`/`multipart`/`text` values, file paths, `cleanup`, `manualChecks[].sql` (not in `expect`). A string that is exactly `{{name}}` keeps the value's type. Built-ins: `{{$uuid}}` (new per occurrence), `{{$now}}` (UTC ISO-8601). Variables are set by `extract`. Unknown variable → step fails before sending.
 
 Dotted paths: `data.token`, `data.items[0].id`, `items[2]`, `[0].id` (root array), `""` (whole body). Case-sensitive.
 
@@ -138,7 +143,7 @@ Global flags on every command (put them after the command): `--app NAME`, `--env
 | `apiprobe init NAME [--repo PATH]` | Write config template (`--repo` defaults to cwd) | 0 / 2 if exists |
 | `apiprobe find TEXT` | Search spec (every word must match method/path/summary/operationId/tags) | 0 (also with no results) |
 | `apiprobe show "METHOD /path"` | Describe one endpoint: params, body fields, responses | 0 / 2 |
-| `apiprobe call METHOD PATH [--as ROLE] [--body JSON or @file] [--query k=v ...] [--header k=v ...]` | One request, no assertions | 0 if 2xx, 1 otherwise, 2 on error |
+| `apiprobe call METHOD PATH [--as ROLE] [--body JSON or @file | --form k=v ... | --part k=v or k=@path[;type=MIME][;filename=N] ... | --text STR or @file | --file @path] [--query k=v ...] [--header k=v ...]` | One request (one body flag; files must be inside the repo or cwd), no assertions | 0 if 2xx, 1 otherwise, 2 on error |
 | `apiprobe run PLAN.json` | Execute plan | 0 passed / 1 failed / 2 error |
 
 - `--json` prints the result as JSON only; errors as `{"error": {"code", "message"}}`.

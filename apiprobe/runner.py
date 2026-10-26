@@ -6,12 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import http
+from .body import check_call_body, resolve_file, resolve_multipart, summarize
 from .config import get_user, resolve_env
 from .errors import ApiProbeError
 from .store import save_run
 from .vars import lookup, substitute, valid_path
 
-METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _ID_RE = re.compile(r"[a-z0-9_]+")
 
 
@@ -69,7 +70,7 @@ def load_plan(path: str) -> dict:
         raise ApiProbeError("PLAN_INVALID", f"{p}: not valid JSON (line {e.lineno}, column {e.colno}: {e.msg})")
 
 
-def _check_call(call, where: str, env: dict, problems: list):
+def _check_call(call, where: str, env: dict, problems: list, files=None):
     if not isinstance(call, dict):
         problems.append(f"{where} must be an object")
         return
@@ -84,9 +85,11 @@ def _check_call(call, where: str, env: dict, problems: list):
     for key in ("query", "headers"):
         if key in call and not isinstance(call[key], dict):
             problems.append(f"{where}.{key} must be an object")
+    check_call_body(call, where, problems, files)
 
 
-def validate_plan(plan, env: dict) -> list[str]:
+def validate_plan(plan, env: dict, files=None) -> list[str]:
+    """files = (base folder, allowed roots) turns on upload-file checks (D15)."""
     if not isinstance(plan, dict):
         return ["plan must be a JSON object"]
     problems = []
@@ -108,7 +111,7 @@ def validate_plan(plan, env: dict) -> list[str]:
         elif sid in seen:
             problems.append(f"{where}.id '{sid}' is duplicated")
         seen.add(sid)
-        _check_call(step.get("call"), f"{where}.call", env, problems)
+        _check_call(step.get("call"), f"{where}.call", env, problems, files)
         extract = step.get("extract", {})
         if not isinstance(extract, dict) or not all(isinstance(p, str) and valid_path(p) for p in extract.values()):
             problems.append(f"{where}.extract must map variable names to dotted paths")
@@ -131,7 +134,7 @@ def validate_plan(plan, env: dict) -> list[str]:
         problems.append("cleanup must be a list")
         cleanup = []
     for i, call in enumerate(cleanup):
-        _check_call(call, f"cleanup[{i}]", env, problems)
+        _check_call(call, f"cleanup[{i}]", env, problems, files)
     checks = plan.get("manualChecks", [])
     if not isinstance(checks, list) or not all(isinstance(c, dict) and isinstance(c.get("sql"), str) for c in checks):
         problems.append("manualChecks must be a list of objects with a 'sql' string")
@@ -165,8 +168,9 @@ def _is_json(text: str) -> bool:
 class _Session:
     """Per-run state: env, variables."""
 
-    def __init__(self, app, env):
+    def __init__(self, app, env, files):
         self.app, self.env, self.variables = app, env, {}
+        self.base, self.roots = files
         self.timeout = app.get("timeoutSeconds", 30)
 
     def token(self, role):
@@ -180,13 +184,19 @@ class _Session:
             "query": substitute(call.get("query"), self.variables),
             "headers": substitute(call.get("headers"), self.variables),
             "body": substitute(call.get("body"), self.variables),
+            **{k: substitute(call.get(k), self.variables) for k in ("form", "multipart", "text", "file")},
         }
         if not isinstance(out["path"], str) or not out["path"].startswith("/") or out["path"].startswith("//"):
             raise ApiProbeError("PLAN_INVALID", f"path became {_show(out['path'])} after substitution; it must start with '/'")
+        if out["file"] is not None:
+            out["file"] = str(resolve_file(out["file"], "call.file", self.base, self.roots))
+        if out["multipart"] is not None:
+            out["multipart"] = resolve_multipart(out["multipart"], self.base, self.roots)
         return out
 
     def send(self, req, role) -> dict:
-        return http.send(self.env, self.timeout, req["method"], req["path"], req["query"], req["headers"], req["body"], self.token(role))
+        return http.send(self.env, self.timeout, req["method"], req["path"], req["query"], req["headers"], req["body"], self.token(role),
+                         form=req["form"], multipart=req["multipart"], text=req["text"], file=req["file"])
 
 
 def _run_step(step, s: _Session) -> dict:
@@ -195,7 +205,8 @@ def _run_step(step, s: _Session) -> dict:
               "extracted": {}, "error": None, "source": step.get("source")}
     try:
         req = s.prepare(call)
-        result["request"] = {"method": req["method"], "url": http.build_url(s.env, req["path"], req["query"]), "body": req["body"]}
+        result["request"] = {"method": req["method"], "url": http.build_url(s.env, req["path"], req["query"]), "body": req["body"],
+                             **summarize(req)}
         resp = s.send(req, call.get("as"))
     except ApiProbeError as e:
         result["error"] = e.to_dict()
@@ -273,10 +284,12 @@ def run_plan(plan: dict, app: dict, env_name: str | None = None, on_event=None, 
     result = {"app": app["name"], "environment": None, "title": plan.get("title") if isinstance(plan, dict) else None,
               "planPath": plan_path, "startedAt": started, "durationMs": 0, "status": "error", "steps": [],
               "cleanup": [], "manualChecks": [], "variables": {}, "error": None, "savedTo": None}
+    base = Path(plan_path).parent if plan_path else Path.cwd()
+    files = (base, [app.get("repoPath"), base])
     try:
         env = resolve_env(app, env_name or (plan.get("environment") if isinstance(plan, dict) else None))
         result["environment"] = env["name"]
-        problems = validate_plan(plan, env)
+        problems = validate_plan(plan, env, files)
         if problems:
             raise ApiProbeError("PLAN_INVALID", f"{plan_path or 'plan'}: " + "; ".join(problems))
         for role in sorted(_roles(plan)):
@@ -287,7 +300,7 @@ def run_plan(plan: dict, app: dict, env_name: str | None = None, on_event=None, 
         save_run(app["name"], result)
         return result
 
-    s = _Session(app, env)
+    s = _Session(app, env, files)
     failed = False
     for step in plan["steps"]:
         if failed:

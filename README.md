@@ -102,6 +102,8 @@ Saved in the app repo at `.apiprobe/plans/<slug>.json` so the team can share it.
 
 Assertions: plain JSON value (deep-equal), `{"exists": true|false}`, `{"contains": x}` (substring or list element). Missing `expect.status` → any 2xx passes. Built-in variables: `{{$uuid}}`, `{{$now}}`. After the first failing step the rest are skipped; cleanup always runs. Full rules are in `skill/SKILL.md`.
 
+Request bodies: a call carries at most one of `body` (JSON), `form` (urlencoded), `multipart` (text, `{"json": X}` and `{"file": path}` parts), `text` or `file` (raw). Upload files must live inside the app's `repoPath` or the plan's folder (put fixtures in `<repo>/.apiprobe/files/`); anything else is rejected before a request is sent. Runs record file name, size and type, never file bytes.
+
 Every run is saved to `~/.apiprobe/runs/<app>/<UTC timestamp>-<plan>.json` (full response bodies; no request headers, so no tokens).
 
 ## Commands
@@ -114,7 +116,7 @@ Global flags (after the command): `--app NAME`, `--env NAME`, `--json`.
 | `apiprobe init NAME [--repo PATH]` | Write config template (`--repo` defaults to cwd) | 0 / 2 if exists |
 | `apiprobe find TEXT` | Search spec | 0 (also with no results) |
 | `apiprobe show "METHOD /path"` | Describe one endpoint | 0 / 2 |
-| `apiprobe call METHOD PATH [--as ROLE] [--body JSON or @file] [--query k=v ...] [--header k=v ...]` | One request, no assertions | 0 if 2xx, 1 otherwise, 2 on error |
+| `apiprobe call METHOD PATH [--as ROLE] [--body JSON or @file | --form k=v ... | --part k=v or k=@path[;type=MIME][;filename=N] ... | --text STR or @file | --file @path] [--query k=v ...] [--header k=v ...]` | One request, no assertions (one body flag) | 0 if 2xx, 1 otherwise, 2 on error |
 | `apiprobe run PLAN.json` | Execute plan | 0 passed / 1 failed / 2 error |
 
 ## Security notes

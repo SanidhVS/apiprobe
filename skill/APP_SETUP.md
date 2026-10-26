@@ -21,6 +21,7 @@ Record each discovered value with its source (file:line).
 | verifyTls | https on localhost → `false` |
 | auth | `[Authorize]`/auth middleware present → users need tokens; none → users can be omitted |
 | how to get a token | so you can tell the user: the app's login endpoint (route named login/token/auth/signin — e.g. run it in Swagger UI and copy the token field from the response), or the browser devtools Network tab (`Authorization: Bearer ...` header of any API call) when the app uses an external identity provider. Token lifetime setting (e.g. `JwtValidFor`, `AccessTokenLifetime`) tells the user how often to refresh |
+| upload limits | only if the app takes files: `MaxRequestBodySize`/`[RequestSizeLimit]`, multer `limits`, `spring.servlet.multipart.max-file-size` — needed for the 413 negative case |
 | roles | role names in `[Authorize(Roles=...)]`, policies, role enums, seed data; data scoping (depot, tenant, branch) → suggest one user per scope for access tests |
 
 ## Step 2 — Ask the user (one message)

@@ -133,6 +133,8 @@ def _type(spec, schema) -> str:
         return f"array<{_type(spec, schema.get('items', {}))}>"
     if not t:
         t = "object" if "properties" in schema or "allOf" in schema else "any"
+    if t == "string" and (schema.get("format") == "binary" or "contentMediaType" in schema):
+        return "file"
     return f"{t}({schema['format']})" if schema.get("format") else t
 
 
@@ -224,7 +226,9 @@ def describe(spec: dict, method: str, path: str) -> dict:
     body = None
     if "requestBody" in op:
         rb = _deref(spec, op["requestBody"])
-        body = {"required": bool(rb.get("required")), **(_content(spec, rb.get("content")) or {"contentType": None, "fields": []})}
+        content = rb.get("content") or {}
+        body = {"required": bool(rb.get("required")), **(_content(spec, content) or {"contentType": None, "fields": []}),
+                "contentTypes": [{"contentType": ct, "fields": _flatten(spec, c.get("schema"))} for ct, c in content.items()]}
 
     responses = {}
     for code, raw in (op.get("responses") or {}).items():

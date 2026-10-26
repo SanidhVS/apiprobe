@@ -5,7 +5,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from pathlib import Path
 
+from .body import guess_type, iter_parts
 from .errors import ApiProbeError
 
 
@@ -20,14 +23,68 @@ def build_url(env: dict, path: str, query: dict | None = None) -> str:
     return url
 
 
-def send(env: dict, timeout: int, method, path, query=None, headers=None, body=None, token=None) -> dict:
-    """Send one request. Any HTTP status comes back as data; only transport errors raise REQUEST_FAILED."""
+def _read(path) -> bytes:
+    try:
+        return Path(path).read_bytes()
+    except OSError as e:
+        raise ApiProbeError("PLAN_INVALID", f"could not read file {path}: {e}")
+
+
+def _quote(s: str) -> str:
+    return s.replace("\r", "").replace("\n", "").replace('"', "%22")
+
+
+def _encode_multipart(fields: dict) -> tuple[bytes, str]:
+    boundary = uuid.uuid4().hex
+    out = []
+    for name, part in iter_parts(fields):
+        disposition, ctype = f'form-data; name="{_quote(name)}"', None
+        if isinstance(part, dict) and "file" in part:
+            filename = part.get("filename") or Path(part["file"]).name
+            disposition += f'; filename="{_quote(filename)}"'
+            ctype, content = part.get("contentType") or guess_type(part["file"]), _read(part["file"])
+        elif isinstance(part, dict):
+            ctype, content = "application/json", json.dumps(part["json"]).encode("utf-8")
+        else:
+            content = _text(part).encode("utf-8")
+        head = f"--{boundary}\r\nContent-Disposition: {disposition}\r\n" + (f"Content-Type: {ctype}\r\n" if ctype else "") + "\r\n"
+        out += [head.encode("utf-8"), content, b"\r\n"]
+    out.append(f"--{boundary}--\r\n".encode("ascii"))
+    return b"".join(out), f"multipart/form-data; boundary={boundary}"
+
+
+def _encode_other(form, multipart, text, file) -> tuple[bytes, str, bool] | None:
+    """(data, content type, may a caller header override the type) for form/multipart/text/file bodies."""
+    if form is not None:
+        pairs = [(k, _text(x)) for k, v in form.items() for x in (v if isinstance(v, list) else [v])]
+        return urllib.parse.urlencode(pairs).encode("ascii"), "application/x-www-form-urlencoded", True
+    if multipart is not None:
+        data, ctype = _encode_multipart(multipart)
+        return data, ctype, False
+    if text is not None:
+        return text.encode("utf-8"), "text/plain", True
+    if file is not None:
+        return _read(file), guess_type(file), True
+    return None
+
+
+def send(env: dict, timeout: int, method, path, query=None, headers=None, body=None, token=None, *,
+         form=None, multipart=None, text=None, file=None) -> dict:
+    """Send one request. Any HTTP status comes back as data; only transport errors raise REQUEST_FAILED.
+    At most one of body/form/multipart/text/file; file paths must already be resolved and checked (body.resolve_file)."""
     url = build_url(env, path, query)
     req_headers = {"Accept": "application/json", **{k: _text(v) for k, v in (headers or {}).items()}}
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         req_headers["Content-Type"] = "application/json"
+    elif (other := _encode_other(form, multipart, text, file)) is not None:
+        data, ctype, overridable = other
+        have = [k for k in req_headers if k.lower() == "content-type"]
+        if not (overridable and have):
+            for k in have:
+                del req_headers[k]
+            req_headers["Content-Type"] = ctype
     if token:
         req_headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, data=data, headers=req_headers, method=method.upper())
