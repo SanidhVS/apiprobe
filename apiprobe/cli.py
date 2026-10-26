@@ -6,15 +6,12 @@ import traceback
 import urllib.parse
 from pathlib import Path
 
-from . import __version__, config, http, runner, spec
+from . import __version__, config, http, runner, spec, store
+from .brief import brief_call, brief_run, pick, truncate as _truncate
 from .body import BODY_KEYS, resolve_file
 from .errors import ApiProbeError
 
 BODY_LIMIT = 1500
-
-
-def _truncate(text: str, limit: int = BODY_LIMIT) -> str:
-    return text if len(text) <= limit else text[:limit] + f"... ({len(text) - limit} more chars, see saved run)"
 
 
 def _body_text(body) -> str:
@@ -208,14 +205,18 @@ def cmd_call(args):
     resp = http.send(env, app.get("timeoutSeconds", 30), args.method, args.path,
                      _kv(args.query, "--query"), _kv(args.header, "--header"), auth=auth, **sent)
     code = 0 if 200 <= resp["status"] < 300 else 1
+    shown = resp if args.full else brief_call(resp, args.header_out or (), args.pick)
 
     def show():
         print(f"{args.method.upper()} {resp['url']}  →  {resp['status']}  {resp['durationMs']}ms")
-        if resp["bodyText"]:
-            print(_truncate(_body_text(resp["body"]) if resp["body"] is not None else resp["bodyText"]))
+        if args.pick is not None:
+            picked = pick(resp["body"], args.pick)
+            print(_truncate(_body_text(picked["value"]), args.max_chars) if picked["found"] else f"path '{args.pick}' not found in the response body")
+        elif resp["bodyText"] or resp["binary"]:
+            print(_truncate(_body_text(resp["body"]) if resp["body"] is not None else resp["bodyText"], args.max_chars))
         if runner.auth_rejected(resp) and args.as_:
             print(f"hint: {runner.token_hint(app, env, args.as_)}", file=sys.stderr)
-    return resp, code, show
+    return shown, code, show
 
 
 def _short(url: str) -> str:
@@ -223,7 +224,7 @@ def _short(url: str) -> str:
     return p.path + (f"?{p.query}" if p.query else "")
 
 
-def _print_report(r: dict):
+def _print_report(r: dict, limit: int = BODY_LIMIT):
     print(f"{r['title']}  [{r['app']} / {r['environment']}]")
     width = max((len(s["id"]) for s in r["steps"]), default=0) + 2
     for s in r["steps"]:
@@ -244,7 +245,7 @@ def _print_report(r: dict):
         if s["error"]:
             print(f"      error [{s['error']['code']}]: {s['error']['message']}")
         if resp and resp["body"] not in (None, ""):
-            print(f"      body: {_truncate(_body_text(resp['body']))}")
+            print(f"      body: {_truncate(_body_text(resp['body']), limit)}")
     if r["cleanup"]:
         print("Cleanup")
         for c in r["cleanup"]:
@@ -278,7 +279,35 @@ def cmd_run(args):
             print(f"error [{result['error']['code']}]: {result['error']['message']}", file=sys.stderr)
             print(f"saved: {result['savedTo']}", file=sys.stderr)
         return result, 2, show
-    return result, 0 if result["status"] == "passed" else 1, lambda: _print_report(result)
+    shown = result if args.full else brief_run(result, args.max_chars)
+    return shown, 0 if result["status"] == "passed" else 1, lambda: _print_report(result, args.max_chars)
+
+
+def cmd_last(args):
+    run = store.latest_run(_app(args)["name"], args.plan)
+    if args.pick is not None and not args.step:
+        raise ApiProbeError("PLAN_INVALID", "--pick needs --step ID: it picks a path from that step's response body")
+    if not args.step:
+        shown = run if args.full else brief_run(run, args.max_chars)
+        return shown, 0, lambda: _print_report(run, args.max_chars)
+    step = next((s for s in run["steps"] if s["id"] == args.step), None)
+    if step is None:
+        raise ApiProbeError("STEP_NOT_FOUND", f"no step '{args.step}' in the last run ({run['savedTo']}); steps: {', '.join(s['id'] for s in run['steps']) or 'none'}")
+    if args.pick is None:
+        return step, 0, lambda: print(json.dumps(step, indent=2, ensure_ascii=False))
+    picked = {"step": step["id"], **pick((step["response"] or {}).get("body"), args.pick)}
+    return picked, 0, lambda: print(_body_text(picked["value"]) if picked["found"] else f"path '{args.pick}' not found in step '{args.step}' response body")
+
+
+def cmd_runs(args):
+    runs = store.list_runs(_app(args)["name"], args.limit)
+
+    def show():
+        for r in runs:
+            print(f"{r['startedAt']}  {str(r['status']):<7} {r['title']}  [{r['environment']}]  {r['path']}")
+        if not runs:
+            print("No saved runs.")
+    return runs, 0, show
 
 
 # ---------- entry point ----------
@@ -310,7 +339,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("target", nargs="+")
     p.set_defaults(func=cmd_show)
 
-    p = sub.add_parser("call", parents=[common], help="send one request, no assertions")
+    shaping = argparse.ArgumentParser(add_help=False)
+    shaping.add_argument("--full", action="store_true", help="print the complete result (default: compact)")
+    shaping.add_argument("--max-chars", type=int, default=BODY_LIMIT, metavar="N", help=f"cut response bodies at N characters (default {BODY_LIMIT})")
+
+    p = sub.add_parser("call", parents=[common, shaping], help="send one request, no assertions")
     p.add_argument("method", type=str.upper, choices=sorted(runner.METHODS))
     p.add_argument("path")
     p.add_argument("--as", dest="as_", metavar="ROLE", help="user role from the config")
@@ -321,11 +354,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--file", metavar="@path", help="raw file body")
     p.add_argument("--query", action="append", metavar="k=v")
     p.add_argument("--header", action="append", metavar="k=v")
+    p.add_argument("--pick", metavar="PATH", help="print only this path of the response body")
+    p.add_argument("--header-out", action="append", metavar="NAME", help="also show this response header (repeatable)")
     p.set_defaults(func=cmd_call)
 
-    p = sub.add_parser("run", parents=[common], help="execute a plan file")
+    p = sub.add_parser("run", parents=[common, shaping], help="execute a plan file")
     p.add_argument("plan")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("last", parents=[common, shaping], help="show the newest saved run, or one step of it in full")
+    p.add_argument("--step", metavar="ID", help="show this step in full")
+    p.add_argument("--pick", metavar="PATH", help="with --step: only this path of its response body")
+    p.add_argument("--plan", metavar="NAME", help="newest run of this plan (file name or slug)")
+    p.set_defaults(func=cmd_last)
+
+    p = sub.add_parser("runs", parents=[common], help="list saved runs, newest first")
+    p.add_argument("--limit", type=int, default=10, metavar="N")
+    p.set_defaults(func=cmd_runs)
     return parser
 
 

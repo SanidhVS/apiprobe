@@ -1,4 +1,5 @@
 """One HTTP call, stdlib urllib only (PLAN.md 8.6, 10)."""
+import hashlib
 import json
 import ssl
 import time
@@ -75,12 +76,19 @@ def _add_key(url: str, name: str, value: str) -> str:
     return url + ("&" if "?" in url else "?") + f"{urllib.parse.quote_plus(name)}={value}"
 
 
+def _is_text(content_type: str) -> bool:
+    ct = content_type.split(";")[0].strip().lower()
+    return not ct or ct.startswith("text/") or any(k in ct for k in ("json", "xml", "html")) or ct == "application/x-www-form-urlencoded"
+
+
 def send(env: dict, timeout: int, method, path, query=None, headers=None, body=None, auth=None, *,
-         form=None, multipart=None, text=None, file=None) -> dict:
+         form=None, multipart=None, text=None, file=None, save_to=None) -> dict:
     """Send one request. Any HTTP status comes back as data; only transport errors raise REQUEST_FAILED.
     auth is a config user entry: {"token"} plus at most one of scheme/header/query/cookie (D16); a query-string
     token is masked in the returned and error urls.
-    At most one of body/form/multipart/text/file; file paths must already be resolved and checked (body.resolve_file)."""
+    At most one of body/form/multipart/text/file; file paths must already be resolved and checked (body.resolve_file).
+    A response that is not text/JSON/XML/HTML/form comes back as a summary body (size, type, sha256), never decoded;
+    save_to (already checked, body.resolve_output) gets the raw bytes of a 2xx response."""
     url = shown = build_url(env, path, query)
     req_headers = {"Accept": "application/json", **{k: _text(v) for k, v in (headers or {}).items()}}
     data = None
@@ -122,15 +130,30 @@ def send(env: dict, timeout: int, method, path, query=None, headers=None, body=N
         with resp:
             raw = resp.read()
             status, resp_headers = resp.status, dict(resp.headers.items())
+            cookie_names = [c.split("=", 1)[0].strip() for c in resp.headers.get_all("Set-Cookie") or []]
+            content_type = resp.headers.get("Content-Type", "")
     except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError) as e:
         reason = getattr(e, "reason", e)
         raise ApiProbeError("REQUEST_FAILED", f"{method.upper()} {shown} failed: {reason}. Is the API running, and is baseUrl right in the app config?")
     duration = round((time.perf_counter() - started) * 1000)
 
-    text = raw.decode("utf-8", errors="replace")
-    try:
-        parsed = json.loads(text) if text.strip() else None
-    except json.JSONDecodeError:
-        parsed = None
-    return {"status": status, "headers": resp_headers, "body": parsed, "bodyText": text, "durationMs": duration, "url": shown}
+    saved = None
+    if save_to and 200 <= status < 300:
+        Path(save_to).parent.mkdir(parents=True, exist_ok=True)
+        Path(save_to).write_bytes(raw)
+        saved = {"path": str(save_to), "bytes": len(raw)}
+
+    binary = bool(raw) and not _is_text(content_type)
+    if binary:
+        parsed = {"binary": True, "bytes": len(raw), "contentType": content_type.split(";")[0].strip().lower(),
+                  "sha256": hashlib.sha256(raw).hexdigest()}
+        text = ""
+    else:
+        text = raw.decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(text) if text.strip() else None
+        except json.JSONDecodeError:
+            parsed = None
+    return {"status": status, "headers": resp_headers, "body": parsed, "bodyText": text, "durationMs": duration, "url": shown,
+            "binary": binary, "cookieNames": cookie_names, "saved": saved}
 

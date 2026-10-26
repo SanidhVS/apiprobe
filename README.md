@@ -105,6 +105,8 @@ Assertions: plain JSON value (deep-equal), `{"exists": true|false}`, `{"contains
 
 Request bodies: a call carries at most one of `body` (JSON), `form` (urlencoded), `multipart` (text, `{"json": X}` and `{"file": path}` parts), `text` or `file` (raw). Upload files must live inside the app's `repoPath` or the plan's folder (put fixtures in `<repo>/.apiprobe/files/`); anything else is rejected before a request is sent. Runs record file name, size and type, never file bytes.
 
+Binary responses (PDF, images, archives…) are never decoded: the body is reported as `{"binary": true, "bytes", "contentType", "sha256"}` and can be asserted on. `call.saveTo` (inside the repo or plan folder) also writes the bytes of a 2xx response to disk.
+
 Every run is saved to `~/.apiprobe/runs/<app>/<UTC timestamp>-<plan>.json` (full response bodies; no request headers, so no tokens).
 
 ## Commands
@@ -117,8 +119,10 @@ Global flags (after the command): `--app NAME`, `--env NAME`, `--json`.
 | `apiprobe init NAME [--repo PATH]` | Write config template (`--repo` defaults to cwd) | 0 / 2 if exists |
 | `apiprobe find TEXT` | Search spec | 0 (also with no results) |
 | `apiprobe show "METHOD /path"` | Describe one endpoint | 0 / 2 |
-| `apiprobe call METHOD PATH [--as ROLE] [--body JSON or @file | --form k=v ... | --part k=v or k=@path[;type=MIME][;filename=N] ... | --text STR or @file | --file @path] [--query k=v ...] [--header k=v ...]` | One request, no assertions (one body flag) | 0 if 2xx, 1 otherwise, 2 on error |
-| `apiprobe run PLAN.json` | Execute plan | 0 passed / 1 failed / 2 error |
+| `apiprobe call METHOD PATH [--as ROLE] [--body JSON/@file / --form k=v / --part k=v or k=@path[;type=MIME][;filename=N] / --text STR/@file / --file @path] [--query k=v ...] [--header k=v ...] [--pick PATH] [--header-out NAME] [--max-chars N] [--full]` | One request, no assertions (one body flag). `--json` is compact; `--full` prints everything | 0 if 2xx, 1 otherwise, 2 on error |
+| `apiprobe run PLAN.json [--max-chars N] [--full]` | Execute plan; `--json` is compact (failed steps carry the detail), `--full` prints everything | 0 passed / 1 failed / 2 error |
+| `apiprobe last [--step ID [--pick PATH]] [--plan NAME]` | Newest saved run (compact), one step in full, or one value of its response body | 0 / 2 |
+| `apiprobe runs [--limit N]` | List saved runs, newest first (default 10) | 0 |
 
 ## Security notes
 

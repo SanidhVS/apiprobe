@@ -13,6 +13,9 @@ from pathlib import Path
 FIXTURE = Path(__file__).parent / "fixtures" / "openapi.json"
 
 
+BINARY = b"%PDF-1.4\n\x00\xff\xfe\x80 binary"
+
+
 def _parse_multipart(content_type: str, raw: bytes) -> list:
     msg = BytesParser(policy=default).parsebytes(f"Content-Type: {content_type}\r\n\r\n".encode() + raw)
     parts = []
@@ -39,6 +42,18 @@ class _Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(raw)
 
+    def _reply_bytes(self, status, raw, content_type, headers=None, cookies=()):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        for c in cookies:
+            self.send_header("Set-Cookie", c)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(raw)
+
     def _handle(self):
         url = urllib.parse.urlsplit(self.path)
         length = int(self.headers.get("Content-Length") or 0)
@@ -58,6 +73,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply(200, {"contentType": self.headers.get("Content-Type"), "fields": urllib.parse.parse_qs(raw.decode())})
         if url.path == "/upload-echo":
             return self._reply(200, {"contentType": self.headers.get("Content-Type"), "parts": _parse_multipart(self.headers.get("Content-Type", ""), raw)})
+        if url.path == "/binary":  # a "PDF" with bytes that are not valid UTF-8
+            return self._reply_bytes(200, BINARY, "application/pdf", {"Content-Disposition": 'attachment; filename="r.pdf"', "ETag": '"v1"', "X-Secret": "hidden"})
+        if url.path == "/cookies":
+            return self._reply_bytes(200, b'{"ok": true}', "application/json", cookies=["session=SESSIONVALUE; Path=/", "XSRF-TOKEN=XVALUE"])
         if url.path == "/protected":
             return self._reply(200, {"ok": True}) if auth.startswith("Bearer tok-") else self._reply(401, {"message": "no token"})
         if url.path == "/slow":

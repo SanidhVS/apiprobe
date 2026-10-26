@@ -26,6 +26,33 @@ def resolve_file(path, where: str, base, roots) -> Path:
     return full
 
 
+def resolve_output(path, where: str, base, roots) -> Path:
+    """Absolute path for a file apiprobe will write; it must sit inside one of roots (D15) and not be a folder."""
+    if not isinstance(path, str) or not path:
+        raise ApiProbeError("PLAN_INVALID", f"{where} must be a non-empty file path string, got {path!r}")
+    p = Path(path)
+    full = (p if p.is_absolute() else Path(base) / p).resolve()
+    if not any(full.is_relative_to(Path(r).resolve()) for r in roots if r):
+        inside = " or ".join(dict.fromkeys(str(Path(r).resolve()) for r in roots if r))
+        raise ApiProbeError("PLAN_INVALID", f"{where}: '{path}' resolves outside {inside}; save under '.apiprobe/out/' in the repo")
+    if full.is_dir():
+        raise ApiProbeError("PLAN_INVALID", f"{where}: '{path}' is a folder; give a file name")
+    return full
+
+
+def check_save_to(call: dict, where: str, problems: list, ctx):
+    if "saveTo" not in call:
+        return
+    path = call["saveTo"]
+    if not isinstance(path, str) or not path:
+        problems.append(f"{where}.saveTo must be a non-empty file path string")
+    elif ctx and "{{" not in path:  # paths with variables are checked after substitution
+        try:
+            resolve_output(path, f"{where}.saveTo", *ctx)
+        except ApiProbeError as e:
+            problems.append(e.message)
+
+
 def iter_parts(multipart: dict):
     """Yield (field, part); a list value repeats the field."""
     for name, value in multipart.items():

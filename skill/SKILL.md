@@ -46,7 +46,7 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 - Ask: "Run this plan?" Wait.
 
 ### 5. Run
-- `apiprobe run <plan> --json`.
+- `apiprobe run <plan> --json` (compact: passed steps are id/status/time; failed steps carry request, failed assertions, error, response). For more on a failed step use `apiprobe last --step ID` (full detail) or `--pick PATH` (one value of its response body); never rerun just to see a body, and never `cat` a saved run.
 - Exit 2 with USER_NOT_CONFIGURED / TOKEN_EXPIRED → ask for a fresh token for that role (rule 5); rerun once it is in.
 - Exit 2 with CONFIG_INVALID → tell user exactly which file/field to fix; wait.
 - A step failed with 401 and a token hint → the token was rejected (expired early, revoked, wrong environment). Ask for a fresh one; do not report it as an app bug.
@@ -115,6 +115,7 @@ Field rules:
 - File paths are relative to the plan's folder. Keep fixtures in `<repo>/.apiprobe/files/`; ask before creating large files or using real documents. Paths outside the repo (or plan folder) fail validation, nothing is sent. Runs record file name, size and type, never bytes.
 - `extract`: `{varName: dottedPath}`; path not found → step fails.
 - `expect.status`: integer; omitted → any 2xx passes. `expect.json`: `{dottedPath: expectation}`.
+- Binary responses (PDF, images, zips…) are never decoded: the body becomes `{"binary": true, "bytes", "contentType", "sha256"}`, so assert on those (`"bytes": {"exists": true}`, `"contentType": "application/pdf"`). `call.saveTo: "out/r.pdf"` also writes the bytes of a 2xx response; same folder rule as uploads (inside repo or plan folder; use `<repo>/.apiprobe/out/`). Variables work in `saveTo`.
 - `source`: where the expectation came from (`File.cs:line`).
 - `manualChecks[]`: `sql`, `expect`, `why`. Variables are filled in; never executed.
 - `cleanup[]`: same shape as `call`. Always runs, even after failure; calls with undefined variables are skipped.
@@ -144,8 +145,10 @@ Global flags on every command (put them after the command): `--app NAME`, `--env
 | `apiprobe init NAME [--repo PATH]` | Write config template (`--repo` defaults to cwd) | 0 / 2 if exists |
 | `apiprobe find TEXT` | Search spec (every word must match method/path/summary/operationId/tags) | 0 (also with no results) |
 | `apiprobe show "METHOD /path"` | Describe one endpoint: params, body fields, responses | 0 / 2 |
-| `apiprobe call METHOD PATH [--as ROLE] [--body JSON or @file | --form k=v ... | --part k=v or k=@path[;type=MIME][;filename=N] ... | --text STR or @file | --file @path] [--query k=v ...] [--header k=v ...]` | One request (one body flag; files must be inside the repo or cwd), no assertions | 0 if 2xx, 1 otherwise, 2 on error |
-| `apiprobe run PLAN.json` | Execute plan | 0 passed / 1 failed / 2 error |
+| `apiprobe call METHOD PATH [--as ROLE] [--body JSON/@file / --form k=v / --part k=v or k=@path[;type=MIME][;filename=N] / --text STR/@file / --file @path] [--query k=v ...] [--header k=v ...]` | One request (one body flag; files must be inside the repo or cwd). `--json` shows status, a few headers (`--header-out NAME` adds more), body; `--pick PATH` only that body value; `--max-chars N` cuts printed bodies (default 1500); `--full` prints everything, no assertions | 0 if 2xx, 1 otherwise, 2 on error |
+| `apiprobe run PLAN.json` | Execute plan; `--json` is compact, `--full` prints everything | 0 passed / 1 failed / 2 error |
+| `apiprobe last [--step ID [--pick PATH]] [--plan NAME]` | Newest saved run (compact), one step in full, or one value of its response body | 0 / 2 |
+| `apiprobe runs [--limit N]` | List saved runs, newest first (default 10) | 0 |
 
 - `--json` prints the result as JSON only; errors as `{"error": {"code", "message"}}`.
 - Error messages name the file and field to fix — relay them to the user as is.

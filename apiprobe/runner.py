@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import http
-from .body import check_call_body, resolve_file, resolve_multipart, summarize
+from .body import check_call_body, check_save_to, resolve_file, resolve_multipart, resolve_output, summarize
 from .config import get_user, resolve_env
 from .errors import ApiProbeError
 from .store import save_run
@@ -86,6 +86,7 @@ def _check_call(call, where: str, env: dict, problems: list, files=None):
         if key in call and not isinstance(call[key], dict):
             problems.append(f"{where}.{key} must be an object")
     check_call_body(call, where, problems, files)
+    check_save_to(call, where, problems, files)
 
 
 def validate_plan(plan, env: dict, files=None) -> list[str]:
@@ -189,10 +190,12 @@ class _Session:
             "query": substitute(call.get("query"), self.variables),
             "headers": substitute(call.get("headers"), self.variables),
             "body": substitute(call.get("body"), self.variables),
-            **{k: substitute(call.get(k), self.variables) for k in ("form", "multipart", "text", "file")},
+            **{k: substitute(call.get(k), self.variables) for k in ("form", "multipart", "text", "file", "saveTo")},
         }
         if not isinstance(out["path"], str) or not out["path"].startswith("/") or out["path"].startswith("//"):
             raise ApiProbeError("PLAN_INVALID", f"path became {_show(out['path'])} after substitution; it must start with '/'")
+        if out["saveTo"] is not None:
+            out["saveTo"] = str(resolve_output(out["saveTo"], "call.saveTo", self.base, self.roots))
         if out["file"] is not None:
             out["file"] = str(resolve_file(out["file"], "call.file", self.base, self.roots))
         if out["multipart"] is not None:
@@ -201,7 +204,7 @@ class _Session:
 
     def send(self, req, role) -> dict:
         return http.send(self.env, self.timeout, req["method"], req["path"], req["query"], req["headers"], req["body"], self.auth(role),
-                         form=req["form"], multipart=req["multipart"], text=req["text"], file=req["file"])
+                         form=req["form"], multipart=req["multipart"], text=req["text"], file=req["file"], save_to=req["saveTo"])
 
 
 def _run_step(step, s: _Session) -> dict:
@@ -217,9 +220,11 @@ def _run_step(step, s: _Session) -> dict:
         result["error"] = e.to_dict()
         return result
 
-    is_json = _is_json(resp["bodyText"])
+    is_json = resp["binary"] or _is_json(resp["bodyText"])  # a binary response's summary can be asserted on (bytes, sha256, contentType)
     result["response"] = {"status": resp["status"], "durationMs": resp["durationMs"],
                           "body": resp["body"] if is_json else resp["bodyText"]}
+    if resp["saved"]:
+        result["response"]["saved"] = resp["saved"]
     expect = step.get("expect", {})
     asserts = result["assertions"]
     want = expect.get("status")
