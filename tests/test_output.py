@@ -61,6 +61,7 @@ class BinaryTests(WorkCase):
         env = env_of(self.app)
         self.assertFalse(http.send(env, 1, "GET", "/text")["binary"])
         self.assertFalse(http.send(env, 1, "GET", "/echo")["binary"])
+        self.assertFalse(http.send(env, 1, "GET", "/openapi.yaml")["binary"])  # application/yaml is text
         self.assertFalse(http.send(env, 1, "HEAD", "/binary")["binary"])  # no body to summarize
 
     def test_save_to_writes_raw_bytes_only_on_2xx(self):

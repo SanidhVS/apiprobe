@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 FIXTURE = Path(__file__).parent / "fixtures" / "openapi.json"
+YAML_FIXTURE = FIXTURE.with_name("openapi.yaml")
 
 
 BINARY = b"%PDF-1.4\n\x00\xff\xfe\x80 binary"
@@ -93,6 +94,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply(200, {})
         if url.path == "/text":
             return self._reply(200, text="hello")
+        if url.path == "/openapi.yaml":
+            return self._reply_bytes(200, YAML_FIXTURE.read_bytes(), "application/yaml")
         if url.path == "/openapi.json":
             return self._reply(200, json.loads(FIXTURE.read_text()))
         if parts[0] == "items":

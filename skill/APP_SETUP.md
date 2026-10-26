@@ -78,7 +78,7 @@ Location: `~/.apiprobe/apps/<app-name>.json` (file name = app name). Override th
 | Field | Required | Rule |
 |---|---|---|
 | `repoPath` | no | Absolute path. Used for app detection (current folder or any subfolder). Case and `/` vs `\` don't matter. |
-| `specUrl` | yes | Starts with `/` → joined to the environment's `baseUrl`. Starts with `http` → used as is. Otherwise → local file path (relative to `repoPath`). OpenAPI 3.x JSON only. |
+| `specUrl` | yes | Starts with `/` → joined to the environment's `baseUrl`. Starts with `http` → used as is. Otherwise → local file path (relative to `repoPath`). OpenAPI 3.x, JSON or YAML (YAML needs the user to run `uv tool install --editable ".[yaml]" --force` from the apiprobe repo; the SPEC_UNAVAILABLE error says so). |
 | `defaultEnvironment` | yes | Must be a key of `environments`. |
 | `timeoutSeconds` | no | Default 30. |
 | `environments.<env>.baseUrl` | yes | `http://` or `https://`; trailing slash is stripped. |

@@ -67,7 +67,7 @@ Or just ask Claude Code: "test the create leave endpoint" — the skill sets up 
 }
 ```
 
-- `specUrl`: `/path` → joined to `baseUrl`; `http...` → as is; otherwise a local file (relative to `repoPath`). OpenAPI 3.x JSON only.
+- `specUrl`: `/path` → joined to `baseUrl`; `http...` → as is; otherwise a local file (relative to `repoPath`). OpenAPI 3.x as JSON, or as YAML with the optional extra: `uv tool install --editable ".[yaml]" --force` (adds PyYAML; without it a YAML spec fails with that command in the error, and everything else stays standard-library only).
 - Auth is token-only; apiprobe never handles usernames or passwords. Default is `Authorization: Bearer <token>`. Add one of `"scheme": "Basic"` (paste the base64 `user:password` value yourself), `"header": "X-Api-Key"`, `"query": "api_key"` (masked as `***` in output) or `"cookie": "session"` to a user for other schemes. Get a token from your app's login endpoint (e.g. in Swagger UI) or the browser devtools, and paste it in.
 - `apiprobe show` prints the endpoint's `Auth:` requirement; `apiprobe app --json` lists the spec's security schemes (`--no-spec` skips the fetch).
 - A `CHANGE_ME` token only errors when a command or plan actually uses that role. A JWT past its `exp` stops the run with TOKEN_EXPIRED before any request; a 401 shows a "token may be expired" hint. Either way: paste a fresh token and rerun.

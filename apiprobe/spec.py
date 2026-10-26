@@ -13,6 +13,28 @@ MAX_DEPTH = 6
 CACHE_SECONDS = 600
 
 
+def _parse(text: str, where: str, app: dict):
+    """JSON, else YAML when the optional PyYAML is installed (D18)."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        import yaml
+    except ImportError:
+        raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} is not JSON. If it is YAML, install with: uv tool install --editable \".[yaml]\" --force (from the apiprobe repo). Check 'specUrl' in {app['configPath']}")
+
+    class Loader(yaml.SafeLoader):
+        pass
+    # dates stay strings and the result is JSON-shaped: unquoted `200:` keys become "200" like in a JSON spec
+    Loader.yaml_implicit_resolvers = {k: [(tag, rx) for tag, rx in v if tag != "tag:yaml.org,2002:timestamp"]
+                                      for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+    try:
+        return json.loads(json.dumps(yaml.load(text, Loader)))
+    except (yaml.YAMLError, ValueError, TypeError) as e:
+        raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} is neither JSON nor valid YAML ({str(e).splitlines()[0]}). Check 'specUrl' in {app['configPath']}")
+
+
 def load_spec(app: dict, env: dict) -> dict:
     url = app["specUrl"]
     try:
@@ -28,15 +50,13 @@ def load_spec(app: dict, env: dict) -> dict:
             if not path.is_absolute() and app.get("repoPath"):
                 path = Path(app["repoPath"]) / path
             where, text = str(path), path.read_text(encoding="utf-8-sig")
-        spec = json.loads(text)
+        spec = _parse(text, where, app)
     except ApiProbeError as e:
         if e.code == "SPEC_UNAVAILABLE":
             raise
         raise ApiProbeError("SPEC_UNAVAILABLE", f"could not fetch spec: {e.message}")
     except OSError as e:
         raise ApiProbeError("SPEC_UNAVAILABLE", f"could not read spec file {url}: {e}. Check 'specUrl' in {app['configPath']}")
-    except json.JSONDecodeError:
-        raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} is not JSON (YAML is not supported). Check 'specUrl' in {app['configPath']}")
     if not isinstance(spec, dict):
         raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} is not an OpenAPI document")
     if spec.get("swagger"):

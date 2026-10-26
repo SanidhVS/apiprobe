@@ -78,7 +78,7 @@ def _add_key(url: str, name: str, value: str) -> str:
 
 def _is_text(content_type: str) -> bool:
     ct = content_type.split(";")[0].strip().lower()
-    return not ct or ct.startswith("text/") or any(k in ct for k in ("json", "xml", "html")) or ct == "application/x-www-form-urlencoded"
+    return not ct or ct.startswith("text/") or any(k in ct for k in ("json", "xml", "html", "yaml")) or ct == "application/x-www-form-urlencoded"
 
 
 def send(env: dict, timeout: int, method, path, query=None, headers=None, body=None, auth=None, *,
