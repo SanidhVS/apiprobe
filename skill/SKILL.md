@@ -27,7 +27,7 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 
 ### 2. Understand the target
 - `apiprobe find "<words>" --json`, then `apiprobe show "<METHOD /path>" --json`.
-- Endpoint in code but missing/different in spec (ENDPOINT_NOT_FOUND, old fields) → the running API is stale; ask the user to rebuild/restart it, then re-run `find`/`show`.
+- Endpoint in code but missing/different in spec (ENDPOINT_NOT_FOUND, old fields) → the running API is stale; ask the user to rebuild/restart it, then re-run with `--refresh` (the spec is cached for 10 minutes; a missing endpoint refetches once by itself, changed fields do not).
 - `show` lists each accepted request content type with its fields (`file` = upload). Pick the plan body key: `application/json` → `body`, `application/x-www-form-urlencoded` → `form`, `multipart/form-data` → `multipart`, `text/*`/XML → `text`, `application/octet-stream` → `file`.
 - `show` prints `Auth:` for the endpoint. The user's config entry must match it: bearer → `{"token"}`; basic → add `"scheme": "Basic"`; apiKey → add `"header"`, `"query"` or `"cookie"` with the scheme's name. No `Auth:` line → find the type in the code (`APP_SETUP.md` lists what to grep); unsure → ask.
 - Read the controller action, the request handler, any validator, and the entities it writes.
@@ -39,7 +39,8 @@ You drive the `apiprobe` CLI. The CLI decides pass/fail. You decide what to test
 - For shared dev environments, use `{{$uuid}}` for unique names/emails and add cleanup calls for what you create.
 
 ### 4. Draft the plan and get approval
-- Write `<repo>/.apiprobe/plans/<slug>.json` following the plan format below.
+- Write `<repo>/.apiprobe/plans/<slug>.json` following the plan format below. Start each step from `apiprobe scaffold "METHOD /path" --as ROLE` (path variables, required fields, body key and expected status filled in; replace the placeholders and `files/CHANGE_ME`).
+- Run `apiprobe check <plan>` before asking for approval: it checks the plan against the spec (endpoints, required params and fields, body type, upload files) without calling the API; fix every problem line.
 - Show the user a table: step | call | as | expectations | source.
 - List separately: calls with side effects outside the DB (emails, payroll, jobs), deletes, and assumptions.
 - Include negative cases when relevant: validation (missing/partial fields), access (user without rights → 401/403/empty), not-found, wrong/missing API key (401/403) when the endpoint uses one; for uploads also wrong content type (415), missing file part, oversized file (413), disallowed extension.
@@ -121,7 +122,7 @@ Field rules:
 - `manualChecks[]`: `sql`, `expect`, `why`. Variables are filled in; never executed.
 - `cleanup[]`: same shape as `call`. Always runs, even after failure; calls with undefined variables are skipped.
 
-Variables: `{{name}}` in `path`, `query`/`headers` values, `body`/`form`/`multipart`/`text` values, file paths, `cleanup`, `manualChecks[].sql` (not in `expect`). A string that is exactly `{{name}}` keeps the value's type. Built-ins: `{{$uuid}}` (new per occurrence), `{{$now}}` (UTC ISO-8601). Variables are set by `extract`. Unknown variable → step fails before sending.
+Plan-level `"vars": {"depotId": 12}` seeds variables (`extract` may overwrite). Variables: `{{name}}` in `path`, `query`/`headers` values, `body`/`form`/`multipart`/`text` values, file paths, `cleanup`, `manualChecks[].sql` (not in `expect`). A string that is exactly `{{name}}` keeps the value's type. Built-ins: `{{$uuid}}` (new per occurrence), `{{$now}}` (UTC ISO-8601). Variables are set by `extract`. Unknown variable → step fails before sending.
 
 Dotted paths: `data.token`, `data.items[0].id`, `items[2]`, `[0].id` (root array), `""` (whole body). Case-sensitive.
 
@@ -152,11 +153,14 @@ Global flags on every command (put them after the command): `--app NAME`, `--env
 | `apiprobe init NAME [--repo PATH]` | Write config template (`--repo` defaults to cwd) | 0 / 2 if exists |
 | `apiprobe find TEXT` | Search spec (every word must match method/path/summary/operationId/tags) | 0 (also with no results) |
 | `apiprobe show "METHOD /path"` | Describe one endpoint: params, body fields, responses | 0 / 2 |
+| `apiprobe scaffold "METHOD /path" [--as ROLE]` | Print one ready plan step for an endpoint | 0 / 2 |
+| `apiprobe check PLAN.json` | Check a plan against the spec, no calls to the API; one line per problem | 0 ok / 1 problems / 2 error |
 | `apiprobe call METHOD PATH [--as ROLE] [--body JSON/@file / --form k=v / --part k=v or k=@path[;type=MIME][;filename=N] / --text STR/@file / --file @path] [--query k=v ...] [--header k=v ...]` | One request (one body flag; files must be inside the repo or cwd). `--json` shows status, a few headers (`--header-out NAME` adds more), body; `--pick PATH` only that body value; `--max-chars N` cuts printed bodies (default 1500); `--full` prints everything, no assertions | 0 if 2xx, 1 otherwise, 2 on error |
-| `apiprobe run PLAN.json` | Execute plan; `--json` is compact, `--full` prints everything | 0 passed / 1 failed / 2 error |
+| `apiprobe run PLAN.json ...` | Execute plans (several files, or a folder of `*.json`: one saved run each plus a suite summary); `--only STEP_ID` stops after that step (cleanup still runs); `--json` is compact, `--full` prints everything | 0 passed / 1 failed / 2 error (worst of all) |
 | `apiprobe last [--step ID [--pick PATH]] [--plan NAME]` | Newest saved run (compact), one step in full, or one value of its response body | 0 / 2 |
 | `apiprobe runs [--limit N]` | List saved runs, newest first (default 10) | 0 |
 
+- `find`, `show`, `scaffold`, `check` take `--refresh` to bypass the 10-minute spec cache.
 - `--json` prints the result as JSON only; errors as `{"error": {"code", "message"}}`.
 - Error messages name the file and field to fix — relay them to the user as is.
 - If `apiprobe` is not found, ask the user to install it from the apiprobe repo with `uv tool install --editable .` (then `uv tool update-shell` and a new terminal); do not install it yourself.

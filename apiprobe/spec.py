@@ -1,12 +1,16 @@
 """OpenAPI 3.x load, find, describe (PLAN.md section 12)."""
 import json
+import re
+import time
 from pathlib import Path
 
 from . import http
+from .config import home
 from .errors import ApiProbeError
 
 HTTP_METHODS = ("get", "post", "put", "patch", "delete", "head", "options")
 MAX_DEPTH = 6
+CACHE_SECONDS = 600
 
 
 def load_spec(app: dict, env: dict) -> dict:
@@ -40,6 +44,45 @@ def load_spec(app: dict, env: dict) -> dict:
     if not str(spec.get("openapi", "")).startswith("3"):
         raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} has no 'openapi: 3.x' field")
     return spec
+
+
+def _cache_path(app: dict, env: dict) -> Path:
+    return home() / "cache" / (re.sub(r"[^A-Za-z0-9_.-]", "_", f"{app['name']}-{env['name']}") + ".json")
+
+
+def _is_remote(app: dict) -> bool:
+    return app["specUrl"].startswith(("/", "http://", "https://"))
+
+
+def cached_spec(app: dict, env: dict, refresh: bool = False) -> tuple[dict, bool]:
+    """(spec, came_from_cache). A fetched spec is reused for 10 minutes; a spec file in the repo is always read fresh."""
+    path = _cache_path(app, env)
+    if _is_remote(app) and not refresh:
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            if entry["specUrl"] == app["specUrl"] and entry["baseUrl"] == env["baseUrl"] and time.time() - entry["fetchedAt"] < CACHE_SECONDS:
+                return entry["spec"], True
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    spec = load_spec(app, env)
+    if _is_remote(app):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"fetchedAt": time.time(), "specUrl": app["specUrl"], "baseUrl": env["baseUrl"], "spec": spec}), encoding="utf-8")
+        except OSError:
+            pass  # the cache is only a speed-up
+    return spec, False
+
+
+def with_spec(app: dict, env: dict, fn, refresh: bool = False):
+    """fn(spec); when a cached spec could not answer (ENDPOINT_NOT_FOUND) the API may have been rebuilt, so refetch once and retry."""
+    spec, cached = cached_spec(app, env, refresh)
+    try:
+        return fn(spec)
+    except ApiProbeError as e:
+        if e.code != "ENDPOINT_NOT_FOUND" or not cached:
+            raise
+    return fn(cached_spec(app, env, True)[0])
 
 
 def _operations(spec: dict):
@@ -223,14 +266,20 @@ def security(spec: dict, op: dict) -> list[list[dict]]:
     return [[_scheme(spec, k) for k in req] for req in reqs if isinstance(req, dict)]
 
 
-def describe(spec: dict, method: str, path: str) -> dict:
+def find_operation(spec: dict, method: str, path: str) -> tuple[str, dict, dict]:
+    """(path template, path item, operation) or ENDPOINT_NOT_FOUND."""
     method = method.upper()
     template = _match_path(spec, path)
     item = (spec.get("paths") or {}).get(template) if template else None
     if not item or method.lower() not in item:
         hint = f"; {template} supports: {', '.join(m.upper() for m in HTTP_METHODS if m in item)}" if item else ""
         raise ApiProbeError("ENDPOINT_NOT_FOUND", f"{method} {path} is not in the spec{hint}. Use 'apiprobe find <words>' to search")
-    op = item[method.lower()]
+    return template, item, item[method.lower()]
+
+
+def describe(spec: dict, method: str, path: str) -> dict:
+    method = method.upper()
+    template, item, op = find_operation(spec, method, path)
 
     params = {}
     for raw in item.get("parameters", []) + op.get("parameters", []):  # operation-level overrides path-level

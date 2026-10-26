@@ -16,6 +16,7 @@ from .vars import lookup, substitute, valid_path
 
 METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _ID_RE = re.compile(r"[a-z0-9_]+")
+_VAR_NAME_RE = re.compile(r"[A-Za-z0-9_]+")
 
 
 # ---------- plan loading / validation ----------
@@ -105,6 +106,9 @@ def validate_plan(plan, env: dict, files=None) -> list[str]:
         max_ms = expect.get("maxMs")
         if "maxMs" in expect and (isinstance(max_ms, bool) or not isinstance(max_ms, int) or max_ms < 0):
             problems.append(f"{where}.expect.maxMs must be a whole number of milliseconds")
+    seed = plan.get("vars", {})
+    if not isinstance(seed, dict) or not all(_VAR_NAME_RE.fullmatch(k) for k in seed):
+        problems.append("vars must be an object whose keys are variable names (letters, digits, '_')")
     if "cookies" in plan and not isinstance(plan["cookies"], bool):
         problems.append("cookies must be true or false")
     cleanup = plan.get("cleanup", [])
@@ -305,20 +309,29 @@ def _manual_checks(plan, variables) -> list:
     return out
 
 
-def run_plan(plan: dict, app: dict, env_name: str | None = None, on_event=None, plan_path: str | None = None) -> dict:
+def plan_files(app: dict, plan_path: str | None) -> tuple:
+    """(folder relative file paths start at, folders files may live in): the plan's folder and the app repo (D15)."""
+    base = Path(plan_path).parent if plan_path else Path.cwd()
+    return base, [app.get("repoPath"), base]
+
+
+def run_plan(plan: dict, app: dict, env_name: str | None = None, on_event=None, plan_path: str | None = None, only: str | None = None) -> dict:
+    """only: run the steps up to and including this step id (cleanup still runs)."""
     emit = on_event or (lambda event: None)
     started, t0 = _now(), time.perf_counter()
     result = {"app": app["name"], "environment": None, "title": plan.get("title") if isinstance(plan, dict) else None,
               "planPath": plan_path, "startedAt": started, "durationMs": 0, "status": "error", "steps": [],
               "cleanup": [], "manualChecks": [], "variables": {}, "error": None, "savedTo": None}
-    base = Path(plan_path).parent if plan_path else Path.cwd()
-    files = (base, [app.get("repoPath"), base])
+    files = plan_files(app, plan_path)
     try:
         env = resolve_env(app, env_name or (plan.get("environment") if isinstance(plan, dict) else None))
         result["environment"] = env["name"]
         problems = validate_plan(plan, env, files)
         if problems:
             raise ApiProbeError("PLAN_INVALID", f"{plan_path or 'plan'}: " + "; ".join(problems))
+        ids = [s["id"] for s in plan["steps"]]
+        if only is not None and only not in ids:
+            raise ApiProbeError("PLAN_INVALID", f"--only '{only}': no step with that id (steps: {', '.join(ids)})")
         for role in sorted(_roles(plan)):
             get_user(app, env, role)  # fail before sending anything if a used role is still CHANGE_ME
     except ApiProbeError as e:
@@ -328,8 +341,10 @@ def run_plan(plan: dict, app: dict, env_name: str | None = None, on_event=None, 
         return result
 
     s = _Session(app, env, files, plan.get("cookies", False))
+    s.variables.update(plan.get("vars", {}))
     failed = False
-    for step in plan["steps"]:
+    steps = plan["steps"] if only is None else plan["steps"][:ids.index(only) + 1]
+    for step in steps:
         if failed:
             result["steps"].append({"id": step["id"], "status": "skipped", "request": None, "response": None,
                                     "assertions": [], "extracted": {}, "error": None, "source": step.get("source")})

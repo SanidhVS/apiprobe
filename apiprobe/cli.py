@@ -7,6 +7,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import __version__, config, http, runner, spec, store
+from .scaffold import check_plan, scaffold as make_step
 from .brief import brief_call, brief_run, pick, truncate as _truncate
 from .body import BODY_KEYS, resolve_file
 from .errors import ApiProbeError
@@ -135,7 +136,11 @@ def cmd_init(args):
 
 def cmd_find(args):
     app = _app(args)
-    found = spec.find(spec.load_spec(app, config.resolve_env(app, args.env)), args.text)
+    env = config.resolve_env(app, args.env)
+    doc, cached = spec.cached_spec(app, env, args.refresh)
+    found = spec.find(doc, args.text)
+    if not found and cached:  # the API may have been rebuilt since the spec was cached
+        found = spec.find(spec.cached_spec(app, env, True)[0], args.text)
 
     def show():
         for e in found:
@@ -156,13 +161,18 @@ def _print_fields(fields, indent="    "):
         print(f"{indent}{f['property']}  {f['type']}" + (f"  [{', '.join(extra)}]" if extra else ""))
 
 
-def cmd_show(args):
+def _target(args, command: str) -> list:
     target = " ".join(args.target).split(None, 1)
     if len(target) != 2:
-        raise ApiProbeError("ENDPOINT_NOT_FOUND", 'show expects "METHOD /path", e.g. apiprobe show "GET /api/leave/{id}"')
+        raise ApiProbeError("ENDPOINT_NOT_FOUND", f'{command} expects "METHOD /path", e.g. apiprobe {command} "GET /api/leave/{{id}}"')
     _check_path(target[1], "ENDPOINT_NOT_FOUND")
+    return target
+
+
+def cmd_show(args):
+    target = _target(args, "show")
     app = _app(args)
-    d = spec.describe(spec.load_spec(app, config.resolve_env(app, args.env)), target[0], target[1])
+    d = spec.with_spec(app, config.resolve_env(app, args.env), lambda doc: spec.describe(doc, target[0], target[1]), args.refresh)
 
     def show():
         print(f"{d['method']} {d['path']}" + (f" — {d['summary']}" if d["summary"] else ""))
@@ -186,6 +196,34 @@ def cmd_show(args):
             print(f"  {code} {r['description'] or ''}" + (f"  ({r['contentType']})" if r.get("contentType") else ""))
             _print_fields(r.get("fields", []), "      ")
     return d, 0, show
+
+
+def cmd_scaffold(args):
+    method, path = _target(args, "scaffold")
+    app = _app(args)
+    step = spec.with_spec(app, config.resolve_env(app, args.env), lambda doc: make_step(doc, method, path, args.as_), args.refresh)
+    return step, 0, lambda: print(json.dumps(step, indent=2, ensure_ascii=False))
+
+
+def cmd_check(args):
+    plan = runner.load_plan(args.plan)
+    app = _app(args)
+    env = config.resolve_env(app, args.env or (plan.get("environment") if isinstance(plan, dict) else None))
+    files = runner.plan_files(app, str(Path(args.plan).resolve()))
+    doc, cached = spec.cached_spec(app, env, args.refresh)
+    problems, warnings = check_plan(doc, plan, env, files)
+    if cached and any("is not in the spec" in p for p in problems):  # the API may have been rebuilt since the spec was cached
+        problems, warnings = check_plan(spec.cached_spec(app, env, True)[0], plan, env, files)
+    result = {"plan": args.plan, "ok": not problems, "problems": problems, "warnings": warnings}
+
+    def show():
+        for p in problems:
+            print(p)
+        for w in warnings:
+            print(f"warning: {w}")
+        steps = len(plan.get("steps", [])) if isinstance(plan, dict) else 0
+        print(f"OK  {steps} steps checked against the spec" if not problems else f"{len(problems)} problem(s) in {args.plan}")
+    return result, 1 if problems else 0, show
 
 
 def cmd_call(args):
@@ -265,22 +303,59 @@ def _print_report(r: dict, limit: int = BODY_LIMIT):
           f"  ·  saved: {r['savedTo']}")
 
 
+def _plan_files(paths: list) -> list:
+    files = []
+    for p in paths:
+        if Path(p).is_dir():
+            found = sorted(str(f) for f in Path(p).glob("*.json"))
+            if not found:
+                raise ApiProbeError("PLAN_INVALID", f"no *.json plan files in folder {p}")
+            files += found
+        else:
+            files.append(p)
+    return files
+
+
+def _print_result(r: dict, limit: int):
+    if r["status"] != "error":
+        return _print_report(r, limit)
+    print(f"error [{r['error']['code']}]: {r['error']['message']}", file=sys.stderr)
+    if r.get("savedTo"):
+        print(f"saved: {r['savedTo']}", file=sys.stderr)
+
+
+_RANK = {"passed": 0, "failed": 1, "error": 2}
+
+
 def cmd_run(args):
-    plan = runner.load_plan(args.plan)
+    suite = len(args.plan) > 1 or Path(args.plan[0]).is_dir()
+    files = _plan_files(args.plan)
     app = _app(args)
 
     def progress(event):
         if event["type"] == "step_started":
             print(f"  … {event['id']}  {event['method']} {event['path']}", file=sys.stderr, flush=True)
 
-    result = runner.run_plan(plan, app, args.env, None if args.json else progress, str(Path(args.plan).resolve()))
-    if result["status"] == "error":
-        def show():
-            print(f"error [{result['error']['code']}]: {result['error']['message']}", file=sys.stderr)
-            print(f"saved: {result['savedTo']}", file=sys.stderr)
-        return (result if args.full else brief_run(result, args.max_chars)), 2, show
-    shown = result if args.full else brief_run(result, args.max_chars)
-    return shown, 0 if result["status"] == "passed" else 1, lambda: _print_report(result, args.max_chars)
+    results = []
+    for path in files:
+        try:
+            plan = runner.load_plan(path)
+            results.append(runner.run_plan(plan, app, args.env, None if args.json else progress, str(Path(path).resolve()), args.only))
+        except ApiProbeError as e:
+            if not suite:
+                raise
+            results.append({"app": app["name"], "title": path, "status": "error", "durationMs": 0, "error": e.to_dict(), "steps": [], "savedTo": None})
+    code = max(_RANK[r["status"]] for r in results)
+    shown = [r if args.full else brief_run(r, args.max_chars) for r in results]
+    if not suite:
+        return shown[0], code, lambda: _print_result(results[0], args.max_chars)
+    counts = {k: sum(r["status"] == k for r in results) for k in _RANK}
+
+    def show():
+        for r in results:
+            _print_result(r, args.max_chars)
+        print(f"SUITE {list(_RANK)[code].upper()}  {len(results)} plans: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
+    return {"status": list(_RANK)[code], "counts": counts, "plans": shown}, code, show
 
 
 def cmd_last(args):
@@ -331,13 +406,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repo", metavar="PATH", help="app repo root (default: current folder)")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("find", parents=[common], help="search the OpenAPI spec")
+    specflags = argparse.ArgumentParser(add_help=False)
+    specflags.add_argument("--refresh", action="store_true", help="refetch the spec instead of using the 10-minute cache")
+
+    p = sub.add_parser("find", parents=[common, specflags], help="search the OpenAPI spec")
     p.add_argument("text")
     p.set_defaults(func=cmd_find)
 
-    p = sub.add_parser("show", parents=[common], help='describe one endpoint: show "METHOD /path"')
+    p = sub.add_parser("show", parents=[common, specflags], help='describe one endpoint: show "METHOD /path"')
     p.add_argument("target", nargs="+")
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("scaffold", parents=[common, specflags], help='print a ready plan step for an endpoint: scaffold "METHOD /path"')
+    p.add_argument("target", nargs="+")
+    p.add_argument("--as", dest="as_", metavar="ROLE", help="user role to put in the step")
+    p.set_defaults(func=cmd_scaffold)
+
+    p = sub.add_parser("check", parents=[common, specflags], help="check a plan against the spec without calling the API")
+    p.add_argument("plan")
+    p.set_defaults(func=cmd_check)
 
     shaping = argparse.ArgumentParser(add_help=False)
     shaping.add_argument("--full", action="store_true", help="print the complete result (default: compact)")
@@ -358,8 +445,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--header-out", action="append", metavar="NAME", help="also show this response header (repeatable)")
     p.set_defaults(func=cmd_call)
 
-    p = sub.add_parser("run", parents=[common, shaping], help="execute a plan file")
-    p.add_argument("plan")
+    p = sub.add_parser("run", parents=[common, shaping], help="execute plan files (or every *.json in a folder)")
+    p.add_argument("plan", nargs="+")
+    p.add_argument("--only", metavar="STEP_ID", help="run the steps up to and including this one (cleanup still runs)")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("last", parents=[common, shaping], help="show the newest saved run, or one step of it in full")
