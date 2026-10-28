@@ -19,11 +19,13 @@ This puts `apiprobe.exe` in `~/.local/bin`. If `apiprobe` is not found, run `uv 
 
 Don't also `pip install` it into your global Python — two installs can shadow each other.
 
-Install the Claude Code skill by copying the `skill/` folder:
+Install the Claude Code skill by linking the `skill/` folder (from the repo root), so `git pull` keeps it current:
 
 ```powershell
-Copy-Item -Recurse -Force skill "$HOME\.claude\skills\apiprobe"
+New-Item -ItemType Junction -Path "$HOME\.claude\skills\apiprobe" -Target "$PWD\skill"
 ```
+
+On macOS/Linux: `ln -s "$PWD/skill" ~/.claude/skills/apiprobe`. If you copied the folder before, delete that copy first.
 
 Tests (uv creates `.venv` from `uv.lock` on first run): `uv run python -m unittest discover -s tests -v`
 
@@ -109,7 +111,9 @@ Plan-level `"vars": {"depotId": 12}` seeds variables; `extract` may overwrite th
 
 Binary responses (PDF, images, archives…) are never decoded: the body is reported as `{"binary": true, "bytes", "contentType", "sha256"}` and can be asserted on. `call.saveTo` (inside the repo or plan folder) also writes the bytes of a 2xx response to disk.
 
-Every run is saved to `~/.apiprobe/runs/<app>/<UTC timestamp>-<plan>.json` (full response bodies; no request headers, so no tokens).
+Every run is saved to `~/.apiprobe/runs/<app>/<UTC timestamp>-<plan>.json` (full response bodies; no request headers, so no tokens). The newest 50 runs per app are kept; older ones are deleted.
+
+Redirects are not followed: a 3xx comes back as the step's result (assert on `status` and `headers.Location`), and the token is never sent to another host.
 
 ## Commands
 
@@ -122,9 +126,9 @@ Global flags (after the command): `--app NAME`, `--env NAME`, `--json`. `find`, 
 | `apiprobe find TEXT` | Search spec | 0 (also with no results) |
 | `apiprobe show "METHOD /path"` | Describe one endpoint | 0 / 2 |
 | `apiprobe scaffold "METHOD /path" [--as ROLE]` | Print one ready plan step (path variables, required fields, body type, expected status) | 0 / 2 |
-| `apiprobe check PLAN.json` | Check a plan against the spec without calling the API | 0 ok / 1 problems / 2 error |
+| `apiprobe check PLAN.json` | Check a plan against the spec without calling the API: endpoints, required query params, body type, and JSON body values (type, enum, uuid/date formats, nested required fields; `{{vars}}` skipped) | 0 ok / 1 problems / 2 error |
 | `apiprobe call METHOD PATH [--as ROLE] [--body JSON/@file / --form k=v / --part k=v or k=@path[;type=MIME][;filename=N] / --text STR/@file / --file @path] [--query k=v ...] [--header k=v ...] [--pick PATH] [--header-out NAME] [--max-chars N] [--full]` | One request, no assertions (one body flag). `--json` is compact; `--full` prints everything | 0 if 2xx, 1 otherwise, 2 on error |
-| `apiprobe run PLAN.json ... [--only STEP_ID] [--max-chars N] [--full]` | Execute plans (several files or a folder of `*.json`: one saved run each plus a suite summary); `--only` stops after that step, cleanup still runs; `--json` is compact, `--full` prints everything | 0 passed / 1 failed / 2 error (worst of all) |
+| `apiprobe run PLAN.json ... [--only STEP_ID] [--max-chars N] [--full]` | Execute plans (several files or a folder of `*.json`: one saved run each plus a suite summary); `--only` stops after that step, cleanup still runs; `--json` is compact, `--full` prints everything | 0 passed / 1 failed / 2 error, including an unreachable API (worst of all) |
 | `apiprobe last [--step ID [--pick PATH]] [--plan NAME]` | Newest saved run (compact), one step in full, or one value of its response body | 0 / 2 |
 | `apiprobe runs [--limit N]` | List saved runs, newest first (default 10) | 0 |
 
@@ -133,5 +137,5 @@ Global flags (after the command): `--app NAME`, `--env NAME`, `--json`. `find`, 
 - Configs hold **plaintext tokens** (no passwords). They live in your home folder, never in a repo. Use dev/test accounts only; short-lived tokens limit the damage if one leaks.
 - A token you paste into the AI chat ends up in the conversation transcript. To keep it out, paste it straight into the config file instead.
 - Only put dev/test environments in configs. **Never prod.** Plans contain only paths, never full URLs, so a plan can only reach hosts that are in your config.
-- Responses (which may contain dev data) are read by the AI assistant. If your dev DB holds copies of real personal data, keep that in mind.
+- Responses (which may contain dev data) are read by the AI assistant and saved in plain text under `~/.apiprobe/runs/` (last 50 per app). If your dev DB holds copies of real personal data, keep that in mind.
 - `verifyTls: false` disables certificate checks for that environment; use it only for local self-signed certs.

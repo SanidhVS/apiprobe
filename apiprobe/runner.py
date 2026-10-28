@@ -364,7 +364,10 @@ def run_plan(plan: dict, app: dict, env_name: str | None = None, on_event=None, 
 
     result["manualChecks"] = _manual_checks(plan, s.variables)
     result["variables"] = s.variables
-    result["status"] = "failed" if failed else "passed"
+    # the API could not be reached: an environment problem (exit 2), not a test failure
+    down = next((r["error"] for r in result["steps"] if (r["error"] or {}).get("code") == "REQUEST_FAILED"), None)
+    result["error"] = down
+    result["status"] = "error" if down else "failed" if failed else "passed"
     result["durationMs"] = round((time.perf_counter() - t0) * 1000)
     save_run(app["name"], result)
     return result

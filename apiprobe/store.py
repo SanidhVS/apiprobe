@@ -7,6 +7,8 @@ from pathlib import Path
 from .config import home
 from .errors import ApiProbeError
 
+KEEP_RUNS = 50  # per app; older runs are deleted
+
 
 def _slug(result: dict) -> str:
     base = Path(result["planPath"]).stem if result.get("planPath") else (result.get("title") or "run")
@@ -22,6 +24,8 @@ def save_run(app_name: str, result: dict) -> Path:
         path, n = folder / f"{stem}-{n}.json", n + 1
     result["savedTo"] = str(path)
     path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    for old in _newest_first(app_name)[KEEP_RUNS:]:  # runs hold response bodies, which may be personal data
+        old.unlink(missing_ok=True)
     return path
 
 

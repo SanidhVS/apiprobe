@@ -90,13 +90,40 @@ class CheckTests(TempHome):
             self.assertEqual((problems, warnings), ([], []), f"{method} {path}")
 
     def test_missing_required_body_field(self):
-        problems, _ = self.check({"method": "POST", "path": "/api/leave", "body": {"from": "a", "type": 0}})
+        problems, _ = self.check({"method": "POST", "path": "/api/leave", "body": {"from": "2026-11-01", "type": 0}})
         self.assertEqual(problems, ["steps[0].call.body: required field 'to' is missing"])
 
     def test_unknown_body_field_is_only_a_warning(self):
-        problems, warnings = self.check({"method": "POST", "path": "/api/leave", "body": {"from": "a", "to": "b", "type": 0, "bogus": 1}})
+        problems, warnings = self.check({"method": "POST", "path": "/api/leave", "body": {"from": "2026-11-01", "to": "2026-11-02", "type": 0, "bogus": 1}})
         self.assertEqual(problems, [])
         self.assertEqual(warnings, ["steps[0].call.body: field 'bogus' is not in the spec"])
+
+    def test_body_values_are_checked_against_the_schema(self):
+        problems, _ = self.check({"method": "POST", "path": "/api/leave", "body": {"from": "01/11/2026", "to": 5, "type": 7}})
+        self.assertEqual(problems, ['steps[0].call.body.from: "01/11/2026" is not a valid date',
+                                    "steps[0].call.body.to: expected string, got 5",
+                                    "steps[0].call.body.type: 7 is not one of [0, 1, 2]"])
+
+    def test_nested_objects_and_arrays_are_checked(self):
+        doc = copy.deepcopy(FIXTURE)
+        doc["paths"]["/api/leave"]["post"]["requestBody"]["content"]["application/json"]["schema"] = {
+            "type": "object", "properties": {
+                "staff": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string", "format": "uuid"}}},
+                "days": {"type": "array", "items": {"type": "integer"}}}}
+        problems, warnings = self.check({"method": "POST", "path": "/api/leave", "body": {"staff": {"x": 1}, "days": [1, "two"]}}, doc=doc)
+        self.assertEqual(problems, ["steps[0].call.body.staff: required field 'id' is missing",
+                                    'steps[0].call.body.days[1]: expected integer, got "two"'])
+        self.assertEqual(warnings, ["steps[0].call.body.staff: field 'x' is not in the spec"])
+        problems, _ = self.check({"method": "POST", "path": "/api/leave", "body": {"staff": {"id": "nope"}}}, doc=doc)
+        self.assertEqual(problems, ['steps[0].call.body.staff.id: "nope" is not a valid uuid'])
+
+    def test_variables_and_nulls_are_not_problems(self):
+        problems, warnings = self.check({"method": "POST", "path": "/api/leave",
+                                         "body": {"from": "{{start}}", "to": "{{$now}}", "type": "{{t}}", "note": None}})
+        self.assertEqual((problems, warnings), ([], []))
+        problems, warnings = self.check({"method": "POST", "path": "/api/leave", "body": {"from": None, "to": "2026-11-02", "type": 1}})
+        self.assertEqual(problems, [])
+        self.assertEqual(warnings, ["steps[0].call.body.from is null but the spec does not mark it nullable"])
 
     def test_wrong_method_unknown_path_and_cleanup_are_reported_with_location(self):
         problems, _ = self.check({"method": "PUT", "path": "/api/leave"}, {"method": "GET", "path": "/api/nope"},
@@ -127,7 +154,7 @@ class CheckTests(TempHome):
         self.assertIn("outside", problems[0])
 
     def test_spec_and_file_problems_are_reported_together(self):
-        problems, _ = self.check({"method": "POST", "path": "/api/leave", "body": {"from": "a"}},
+        problems, _ = self.check({"method": "POST", "path": "/api/leave", "body": {"from": "2026-11-01"}},
                                  {"method": "POST", "path": "/api/documents", "multipart": {"title": "t", "file": {"file": "files/none.pdf"}}})
         self.assertEqual(len(problems), 3)
         self.assertEqual([p.split(":")[0].split(".")[0] for p in problems], ["steps[0]", "steps[0]", "steps[1]"])
@@ -277,7 +304,7 @@ class CliAuthoringTests(CliCase):
         code, human = self.main("check", good)
         self.assertEqual(code, 0)
         self.assertIn("OK  1 steps", human)
-        bad = self.write_plan("bad.json", {"title": "t", "steps": [{"id": "g", "call": {"method": "POST", "path": "/api/leave", "as": "admin", "body": {"from": "x"}}}]})
+        bad = self.write_plan("bad.json", {"title": "t", "steps": [{"id": "g", "call": {"method": "POST", "path": "/api/leave", "as": "admin", "body": {"from": "2026-11-01"}}}]})
         code, human = self.main("check", bad)
         self.assertEqual(code, 1)
         self.assertIn("steps[0].call.body: required field 'to' is missing", human)

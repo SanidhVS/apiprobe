@@ -16,6 +16,13 @@ from .errors import ApiProbeError
 MASK = "***"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A 3xx is a result to assert on; following it would also send the token to whatever host Location names."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 def _text(v) -> str:
     return v if isinstance(v, str) else json.dumps(v)
 
@@ -122,14 +129,13 @@ def send(env: dict, timeout: int, method, path, query=None, headers=None, body=N
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
 
+    handlers = [_NoRedirect(), urllib.request.HTTPSHandler(context=context)]
+    if jar is not None:  # cookies the API sets are kept in jar and sent on later calls
+        handlers.append(urllib.request.HTTPCookieProcessor(jar))
     started = time.perf_counter()
     try:
         try:
-            if jar is None:
-                resp = urllib.request.urlopen(request, timeout=timeout, context=context)
-            else:  # cookies the API sets are kept in jar and sent on later calls
-                opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), urllib.request.HTTPSHandler(context=context))
-                resp = opener.open(request, timeout=timeout)
+            resp = urllib.request.build_opener(*handlers).open(request, timeout=timeout)
         except urllib.error.HTTPError as e:
             resp = e  # non-2xx is a normal result
         with resp:

@@ -1,4 +1,5 @@
 """Authoring helpers: scaffold a plan step from the spec, and check a plan against it (PLAN.md 19.7)."""
+import json
 import re
 
 from . import runner, spec as specs
@@ -138,6 +139,61 @@ def _top_level(rows) -> dict:
     return {r["property"]: r["required"] for r in rows if not re.search(r"[.\[]", r["property"])}
 
 
+_FORMATS = {
+    "uuid": re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}"),
+    "date": re.compile(r"\d{4}-\d{2}-\d{2}"),
+    "date-time": re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"),  # .NET also reads a bare date
+}
+
+
+def _type_ok(t: str, v) -> bool:
+    if t == "integer":
+        return isinstance(v, int) and not isinstance(v, bool) or isinstance(v, float) and v.is_integer()
+    if t == "number":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    kinds = {"string": str, "boolean": bool, "array": list, "object": dict}
+    return t not in kinds or isinstance(v, kinds[t])
+
+
+def _check_value(spec: dict, schema, value, where: str, problems: list, warnings: list, visited=frozenset(), depth=0):
+    """A literal JSON value against its schema: type, format, enum, nested required fields, array items.
+    Strings holding {{variables}} are only known at run time, so they are not checked."""
+    if depth > specs.MAX_DEPTH or isinstance(value, str) and "{{" in value:
+        return
+    schema, visited = _schema(spec, schema, visited)
+    if "oneOf" in schema or "anyOf" in schema:
+        return
+    t = schema.get("type")
+    nullable = schema.get("nullable") or isinstance(t, list) and "null" in t
+    t = next((x for x in t if x != "null"), None) if isinstance(t, list) else t
+    t = t or ("object" if schema.get("properties") else None)
+    if value is None:
+        if t and not nullable:  # Swashbuckle often omits nullable, so the API may still accept null
+            warnings.append(f"{where} is null but the spec does not mark it nullable")
+        return
+    if t and not _type_ok(t, value):
+        problems.append(f"{where}: expected {t}, got {json.dumps(value)}")
+        return
+    if "enum" in schema and value not in schema["enum"]:
+        problems.append(f"{where}: {json.dumps(value)} is not one of {json.dumps(schema['enum'])}")
+    fmt = _FORMATS.get(schema.get("format"))
+    if fmt and isinstance(value, str) and not fmt.fullmatch(value):
+        problems.append(f"{where}: {json.dumps(value)} is not a valid {schema['format']}")
+    if isinstance(value, dict):
+        props = schema.get("properties") or {}
+        for name in schema.get("required", []):
+            if name not in value:
+                problems.append(f"{where}: required field '{name}' is missing")
+        for name, v in value.items():
+            if name in props:
+                _check_value(spec, props[name], v, f"{where}.{name}", problems, warnings, visited, depth + 1)
+            elif props:
+                warnings.append(f"{where}: field '{name}' is not in the spec")
+    elif isinstance(value, list) and schema.get("items"):
+        for i, v in enumerate(value):
+            _check_value(spec, schema["items"], v, f"{where}[{i}]", problems, warnings, visited, depth + 1)
+
+
 def _check_call(spec: dict, call: dict, where: str, problems: list, warnings: list):
     path = call["path"]
     if path.startswith("{{"):
@@ -168,7 +224,12 @@ def _check_call(spec: dict, call: dict, where: str, problems: list, warnings: li
     if not match:
         problems.append(f"{where}.{key}: the endpoint accepts " + ", ".join(f"{t['contentType']} ({body_key(t['contentType'])})" for t in types))
         return
-    if key in ("body", "form", "multipart") and isinstance(call[key], dict):
+    if key == "body":  # form/multipart values are text on the wire, so only JSON bodies get type checks
+        op = specs.find_operation(spec, call["method"], path.split("?")[0])[2]
+        content = specs._deref(spec, op["requestBody"])["content"]
+        schema = content.get("application/json", content[match["contentType"]]).get("schema")  # what send() uses
+        _check_value(spec, schema, call["body"], f"{where}.body", problems, warnings)
+    elif key in ("form", "multipart") and isinstance(call[key], dict):
         known = _top_level(match["fields"])
         for name, required in known.items():
             if required and name not in call[key]:

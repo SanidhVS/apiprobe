@@ -81,6 +81,8 @@ class _Handler(BaseHTTPRequestHandler):
         if url.path == "/created":
             host = self.headers["Host"]
             return self._reply_bytes(201, b'{"items": [1, 2, 3]}', "application/json", {"Location": f"http://{host}/items/42", "X-Total": "5"})
+        if url.path == "/redirect":
+            return self._reply_bytes(302, b"", "text/plain", {"Location": "http://elsewhere.test/login"})
         if url.path == "/other-location":
             return self._reply_bytes(201, b"{}", "application/json", {"Location": "http://elsewhere.test/items/42"})
         if url.path == "/login-cookie":
