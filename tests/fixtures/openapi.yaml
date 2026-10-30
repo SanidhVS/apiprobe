@@ -1,0 +1,31 @@
+openapi: 3.0.1
+info:
+  title: Yaml API
+  version: v1
+paths:
+  /api/pets/{id}:
+    get:
+      tags: [Pets]
+      summary: Get a pet
+      operationId: GetPet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  born:
+                    type: string
+                    example: 2026-01-31
+                  name:
+                    type: string
+        404:
+          description: Not Found

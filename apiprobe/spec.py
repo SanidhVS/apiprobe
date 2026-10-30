@@ -1,12 +1,38 @@
 """OpenAPI 3.x load, find, describe (PLAN.md section 12)."""
 import json
+import re
+import time
 from pathlib import Path
 
 from . import http
+from .config import home
 from .errors import ApiProbeError
 
 HTTP_METHODS = ("get", "post", "put", "patch", "delete", "head", "options")
 MAX_DEPTH = 6
+CACHE_SECONDS = 600
+
+
+def _parse(text: str, where: str, app: dict):
+    """JSON, else YAML when the optional PyYAML is installed (D18)."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        import yaml
+    except ImportError:
+        raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} is not JSON. If it is YAML, install with: uv tool install --editable \".[yaml]\" --force (from the apiprobe repo). Check 'specUrl' in {app['configPath']}")
+
+    class Loader(yaml.SafeLoader):
+        pass
+    # dates stay strings and the result is JSON-shaped: unquoted `200:` keys become "200" like in a JSON spec
+    Loader.yaml_implicit_resolvers = {k: [(tag, rx) for tag, rx in v if tag != "tag:yaml.org,2002:timestamp"]
+                                      for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+    try:
+        return json.loads(json.dumps(yaml.load(text, Loader)))
+    except (yaml.YAMLError, ValueError, TypeError) as e:
+        raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} is neither JSON nor valid YAML ({str(e).splitlines()[0]}). Check 'specUrl' in {app['configPath']}")
 
 
 def load_spec(app: dict, env: dict) -> dict:
@@ -24,15 +50,13 @@ def load_spec(app: dict, env: dict) -> dict:
             if not path.is_absolute() and app.get("repoPath"):
                 path = Path(app["repoPath"]) / path
             where, text = str(path), path.read_text(encoding="utf-8-sig")
-        spec = json.loads(text)
+        spec = _parse(text, where, app)
     except ApiProbeError as e:
         if e.code == "SPEC_UNAVAILABLE":
             raise
         raise ApiProbeError("SPEC_UNAVAILABLE", f"could not fetch spec: {e.message}")
     except OSError as e:
         raise ApiProbeError("SPEC_UNAVAILABLE", f"could not read spec file {url}: {e}. Check 'specUrl' in {app['configPath']}")
-    except json.JSONDecodeError:
-        raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} is not JSON (YAML is not supported). Check 'specUrl' in {app['configPath']}")
     if not isinstance(spec, dict):
         raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} is not an OpenAPI document")
     if spec.get("swagger"):
@@ -40,6 +64,45 @@ def load_spec(app: dict, env: dict) -> dict:
     if not str(spec.get("openapi", "")).startswith("3"):
         raise ApiProbeError("SPEC_UNAVAILABLE", f"spec at {where} has no 'openapi: 3.x' field")
     return spec
+
+
+def _cache_path(app: dict, env: dict) -> Path:
+    return home() / "cache" / (re.sub(r"[^A-Za-z0-9_.-]", "_", f"{app['name']}-{env['name']}") + ".json")
+
+
+def _is_remote(app: dict) -> bool:
+    return app["specUrl"].startswith(("/", "http://", "https://"))
+
+
+def cached_spec(app: dict, env: dict, refresh: bool = False) -> tuple[dict, bool]:
+    """(spec, came_from_cache). A fetched spec is reused for 10 minutes; a spec file in the repo is always read fresh."""
+    path = _cache_path(app, env)
+    if _is_remote(app) and not refresh:
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            if entry["specUrl"] == app["specUrl"] and entry["baseUrl"] == env["baseUrl"] and time.time() - entry["fetchedAt"] < CACHE_SECONDS:
+                return entry["spec"], True
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    spec = load_spec(app, env)
+    if _is_remote(app):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"fetchedAt": time.time(), "specUrl": app["specUrl"], "baseUrl": env["baseUrl"], "spec": spec}), encoding="utf-8")
+        except OSError:
+            pass  # the cache is only a speed-up
+    return spec, False
+
+
+def with_spec(app: dict, env: dict, fn, refresh: bool = False):
+    """fn(spec); when a cached spec could not answer (ENDPOINT_NOT_FOUND) the API may have been rebuilt, so refetch once and retry."""
+    spec, cached = cached_spec(app, env, refresh)
+    try:
+        return fn(spec)
+    except ApiProbeError as e:
+        if e.code != "ENDPOINT_NOT_FOUND" or not cached:
+            raise
+    return fn(cached_spec(app, env, True)[0])
 
 
 def _operations(spec: dict):
@@ -133,6 +196,8 @@ def _type(spec, schema) -> str:
         return f"array<{_type(spec, schema.get('items', {}))}>"
     if not t:
         t = "object" if "properties" in schema or "allOf" in schema else "any"
+    if t == "string" and (schema.get("format") == "binary" or "contentMediaType" in schema):
+        return "file"
     return f"{t}({schema['format']})" if schema.get("format") else t
 
 
@@ -202,14 +267,39 @@ def _content(spec, content: dict | None):
     return {"contentType": ct, "fields": _flatten(spec, content[ct].get("schema"))}
 
 
-def describe(spec: dict, method: str, path: str) -> dict:
+def _scheme(spec: dict, key: str) -> dict:
+    s = _deref(spec, ((spec.get("components") or {}).get("securitySchemes") or {}).get(key))
+    out = {"id": key, "type": s.get("type")}
+    for src, dst in (("scheme", "scheme"), ("in", "in"), ("name", "param"), ("bearerFormat", "bearerFormat")):
+        if src in s:
+            out[dst] = s[src].lower() if src == "scheme" and isinstance(s[src], str) else s[src]
+    return out
+
+
+def security_schemes(spec: dict) -> dict:
+    return {k: _scheme(spec, k) for k in (spec.get("components") or {}).get("securitySchemes") or {}}
+
+
+def security(spec: dict, op: dict) -> list[list[dict]]:
+    """The operation's effective security: alternatives (any one works), each a list of schemes (all needed)."""
+    reqs = op["security"] if "security" in op else spec.get("security") or []  # op-level [] means no auth
+    return [[_scheme(spec, k) for k in req] for req in reqs if isinstance(req, dict)]
+
+
+def find_operation(spec: dict, method: str, path: str) -> tuple[str, dict, dict]:
+    """(path template, path item, operation) or ENDPOINT_NOT_FOUND."""
     method = method.upper()
     template = _match_path(spec, path)
     item = (spec.get("paths") or {}).get(template) if template else None
     if not item or method.lower() not in item:
         hint = f"; {template} supports: {', '.join(m.upper() for m in HTTP_METHODS if m in item)}" if item else ""
         raise ApiProbeError("ENDPOINT_NOT_FOUND", f"{method} {path} is not in the spec{hint}. Use 'apiprobe find <words>' to search")
-    op = item[method.lower()]
+    return template, item, item[method.lower()]
+
+
+def describe(spec: dict, method: str, path: str) -> dict:
+    method = method.upper()
+    template, item, op = find_operation(spec, method, path)
 
     params = {}
     for raw in item.get("parameters", []) + op.get("parameters", []):  # operation-level overrides path-level
@@ -224,7 +314,9 @@ def describe(spec: dict, method: str, path: str) -> dict:
     body = None
     if "requestBody" in op:
         rb = _deref(spec, op["requestBody"])
-        body = {"required": bool(rb.get("required")), **(_content(spec, rb.get("content")) or {"contentType": None, "fields": []})}
+        content = rb.get("content") or {}
+        body = {"required": bool(rb.get("required")), **(_content(spec, content) or {"contentType": None, "fields": []}),
+                "contentTypes": [{"contentType": ct, "fields": _flatten(spec, c.get("schema"))} for ct, c in content.items()]}
 
     responses = {}
     for code, raw in (op.get("responses") or {}).items():
@@ -232,4 +324,5 @@ def describe(spec: dict, method: str, path: str) -> dict:
         responses[code] = {"description": r.get("description"), **(_content(spec, r.get("content")) or {})}
 
     return {"method": method, "path": template, "summary": op.get("summary"), "operationId": op.get("operationId"),
-            "tags": op.get("tags", []), "parameters": list(params.values()), "requestBody": body, "responses": responses}
+            "tags": op.get("tags", []), "parameters": list(params.values()), "requestBody": body, "responses": responses,
+            "security": security(spec, op)}

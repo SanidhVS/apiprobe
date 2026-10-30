@@ -2,7 +2,7 @@
 
 AI-assisted API testing for backend developers. An AI coding assistant (Claude Code or similar) reads the app's Swagger spec and source code, drafts a test plan, the developer approves it, a small CLI executes it deterministically, and the AI reports results and asks the developer to confirm behaviour and DB state.
 
-This document is the single source of truth for building v1. A fresh session should be able to build the whole thing from this file alone.
+This document is the single source of truth for building v1. A fresh session should be able to build the whole thing from this file alone. v2 (request body types, more auth types, cheaper output, authoring helpers) is section 19; where it conflicts with earlier sections, section 19 wins.
 
 ---
 
@@ -30,7 +30,7 @@ The AI writes the endpoint, but the developer still tests it by hand: open Swagg
 
 ## 3. Non-goals for v1
 
-Do not build these. They are listed so nobody adds them "for later".
+Do not build these. They are listed so nobody adds them "for later". v2 (section 19) lifts "assertion operators beyond equality/exists/contains" and the YAML part of "Swagger 2.0 / JSON only"; everything else here still stands.
 
 - DB connections or queries of any kind
 - MCP server
@@ -647,3 +647,173 @@ Ordered by likely value:
 - **Shared dev DB pollution.** Mitigated by `{{$uuid}}` and `cleanup`; cleanup depends on the app having delete endpoints.
 - **Real personal data in dev DBs** reaches the AI provider via responses (D11). Revisit masking if so.
 - **Plaintext credentials** in `~/.apiprobe`. Acceptable only for dev/test accounts.
+
+---
+
+## 19. v2 — more request types, more auth types, cheaper output
+
+Goal: cover more real APIs (uploads, forms, API keys, binary downloads) while keeping what the AI reads per command as small as possible. Still stdlib only at runtime (PyYAML is an optional extra). Every phase lands as its own commit with tests green; nothing is sent to an API that v1 would have rejected for safety reasons.
+
+### 19.1 v2 decisions
+
+| # | Decision | Reason |
+|---|---|---|
+| D14 | A call carries exactly one body key: `body` (JSON, unchanged), `form`, `multipart`, `text` or `file` | Covers uploads, legacy form endpoints, XML/CSV; v1 plans keep working |
+| D15 | Upload paths and `saveTo` paths must resolve inside the app's `repoPath` or the plan file's folder; otherwise `PLAN_INVALID` | Stops a plan from sending `~/.ssh/id_rsa` (or any local file) to a hosted API, or writing outside the repo |
+| D16 | Auth types beyond bearer, still token-only (extends D13): a user is `{token}` plus at most one of `scheme`, `header`, `query`, `cookie`. Usernames/passwords are still rejected. Basic auth is accepted only as a pre-encoded token the user pastes into the file themselves | Many APIs use API keys; no password ever passes through the agent |
+| D17 | Output is brief by default; full detail stays in the saved run and is fetched on demand (`last`, `--pick`) | Tokens are the main running cost of the agent loop |
+| D18 | YAML specs supported through an optional extra `apiprobe[yaml]` (PyYAML). Without it, a YAML spec fails with a message naming the install command | Many FastAPI/Spring/NestJS apps serve YAML; core stays stdlib-only |
+| D19 | Deferred (do not build in v2): `poll`/retry for async jobs, `expect.schema` response validation, per-step `continueOnFailure` | User decision: revisit after v2 |
+
+### 19.2 Phase 0 — baseline
+1. Commit pending `skill/SKILL.md` change and this section.
+2. `uv run python -m unittest` → all green before any change.
+
+### 19.3 Phase 1 — request body types (D14, D15)
+
+Plan format (one body key per call):
+
+```json
+"call": {
+  "method": "POST", "path": "/api/documents", "as": "staff",
+  "multipart": {
+    "title": "Contract {{$uuid}}",
+    "meta":  { "json": { "type": "NDA" } },
+    "file":  { "file": "files/contract.pdf", "contentType": "application/pdf", "filename": "c.pdf" },
+    "attachments": [ { "file": "files/a.png" }, { "file": "files/b.png" } ]
+  }
+}
+```
+
+| Key | Value | Sent as | Content-Type |
+|---|---|---|---|
+| `body` | any JSON | JSON (v1 behaviour) | `application/json` |
+| `form` | flat object; list value → key repeated | urlencoded | `application/x-www-form-urlencoded` |
+| `multipart` | field → string (text part), `{"json": X}` (JSON part), `{"file": path, "contentType"?, "filename"?}` (file part), or a list of these (field repeated) | multipart | `multipart/form-data; boundary=…` (always set by apiprobe) |
+| `text` | string | raw UTF-8 | `text/plain` unless `headers` sets one |
+| `file` | path string | raw bytes | `mimetypes.guess_type`, fallback `application/octet-stream`; `headers` may override |
+
+Rules:
+- Relative file paths resolve against the plan file's folder (CLI: current folder). Convention for fixtures: `<repo>/.apiprobe/files/`.
+- D15 containment check uses `Path.resolve()` (follows `..` and symlinks) before reading. Missing file → `PLAN_INVALID` at validation, before anything is sent.
+- `{{vars}}` are substituted in `form`/`multipart` values, `text`, and file paths.
+- Run results store a summary, never file bytes: `"multipart": {"file": "contract.pdf (48213 bytes, application/pdf)"}`.
+- `METHODS` gains `HEAD` and `OPTIONS`.
+
+Code:
+- `http.py`: `send(env, timeout, method, path, query=None, headers=None, body=None, token=None, *, form=None, multipart=None, text=None, file=None)`; `_encode_multipart(fields) -> (bytes, content_type)` with a `uuid4` boundary and `mimetypes`.
+- `runner.py`: `_check_call` — at most one body key, shape of each, files exist and are contained. `_Session.prepare` substitutes the new keys and resolves file paths against the plan folder.
+- `cli.py` `call`: `--form k=v`, `--part k=v`, `--part k=@path[;type=mime][;filename=x]`, `--text STR|@file`, `--file @path`. Mutually exclusive with `--body` the same way plan keys are.
+- `spec.describe`: `requestBody.contentTypes` lists every content type with its fields; `format: binary` (and `contentMediaType`) fields shown as type `file`. `contentType`/`fields` keep pointing at the preferred one (JSON first) for compatibility.
+- `tests/stub_server.py`: `/form-echo` (parsed fields) and `/upload-echo` (field names, filenames, content types, sizes, sha256). Parse multipart with `email.parser.BytesParser` (stdlib).
+- Tests: each body type round-trips; two body keys → `PLAN_INVALID`; missing file; file outside repo (incl. `..`) → `PLAN_INVALID`; repeated fields; vars in multipart; `describe` on a multipart endpoint (add one to `tests/fixtures/openapi.json`).
+
+### 19.4 Phase 2 — auth types (D16)
+
+User entry forms:
+
+| Config | Sends |
+|---|---|
+| `{"token": "eyJ..."}` | `Authorization: Bearer <token>` (v1) |
+| `{"token": "...", "scheme": "Basic"}` | `Authorization: Basic <token>` (any scheme word: `Basic`, `Token`, `ApiKey`) |
+| `{"token": "...", "header": "X-Api-Key"}` | `X-Api-Key: <token>` |
+| `{"token": "...", "query": "api_key"}` | `?api_key=<token>` (token masked as `***` in `request.url` of results and saved runs) |
+| `{"token": "...", "cookie": "session"}` | `Cookie: session=<token>` |
+
+- `config._validate`: at most one of `scheme`/`header`/`query`/`cookie`, each a non-empty string; `username`/`password` keys still `CONFIG_INVALID`.
+- `get_user` unchanged (placeholder + JWT `exp` checks apply to any token that is a JWT).
+- `http.send` takes the user entry (or an `auth` dict) instead of a bare token string; `runner` and `cli call` pass it through.
+- 401 **and** 403-with-no-body hint names the config field, as today.
+- `spec`: new `security(spec, method, path)` → the endpoint's effective security requirements joined with `components.securitySchemes` (type, scheme, `in`, `name`). Shown in `show` output as `Auth: X-Api-Key header (apiKey)` so the agent can pick the config form. `apiprobe app --json` also lists the spec's securitySchemes when the spec is reachable (`--no-spec` to skip).
+- Tests: each form sends the right header/query/cookie; query token masked in results; invalid combos rejected; `show` prints auth.
+
+### 19.5 Phase 3 — response handling and output economy (D17)
+
+- Binary responses: when Content-Type is not JSON / `text/*` / XML / HTML / form, `body` = `{"binary": true, "bytes": N, "contentType": "...", "sha256": "..."}` and no `bodyText`. Optional `call.saveTo: "out/report.pdf"` (D15 containment) writes the bytes.
+- `call --json`: drop `bodyText` when the body parsed as JSON; headers limited to `content-type`, `content-length`, `location`, `content-disposition`, `etag`, and `set-cookie` names only, plus any named by `--header-out NAME`.
+- `call --pick PATH` returns only that path of the body (reuses `vars.lookup`). `--max-chars N` replaces hard-coded `BODY_LIMIT` (default stays 1500).
+- `run --json` is brief by default: passed steps `{id, status, durationMs}`; failed steps add request (method, url, body summary), failed assertions, error, response status and body truncated to `--max-chars`. `--full` prints the v1 shape. The saved run file is always full.
+- New `apiprobe last [--step ID] [--pick PATH] [--plan NAME]`: reads the newest saved run for the app (optionally for one plan slug) and prints the run summary or one step in full. New `apiprobe runs [--limit N]`: lists history via `store.list_runs`.
+- Tests: binary detection and sha256; `saveTo` containment; `--pick`; brief vs `--full` snapshots; `last --step`.
+
+### 19.6 Phase 4 — assertions and extraction
+
+- `expect.status`: integer, list of integers, or `"2xx"`/`"4xx"`-style class string.
+- `expect.headers`: `{name: expectation}`, names case-insensitive, same expectation forms as `expect.json`.
+- `expect.text`: one expectation against the raw body text (for non-JSON responses).
+- `expect.maxMs`: integer; fails when `durationMs` is greater.
+- New one-key operators in `runner.check` (an object whose only key is an operator is an operator, as in v1):
+
+| Operator | Passes when |
+|---|---|
+| `matches` | value is a string and the regex (`re.search`) matches |
+| `length` | len of string/list/object equals N, or satisfies a nested numeric operator (`{"length": {"gte": 1}}`) |
+| `type` | JSON type is one of `string`, `number`, `integer`, `boolean`, `array`, `object`, `null` |
+| `gt` `gte` `lt` `lte` | value is a number (not bool) and the comparison holds |
+| `in` | value deep-equals one element of the list |
+
+- `extract` sources: `"header:location"`, `"cookie:XSRF-TOKEN"`, otherwise a body path as in v1. `"header:location"` with a full URL keeps only path+query when it is on the same `baseUrl`, so it can be reused in `call.path`.
+- Per-run cookie jar (`http.cookiejar.CookieJar`) so cookies the API sets (CSRF, session) are sent on later steps of the same run. Never persisted. Opt-in with plan-level `"cookies": true` so v1 plans behave exactly as before.
+- `validate_plan` checks operator shapes (`matches` compiles, `length` is int or numeric op, etc.).
+- Tests: pass and fail per operator; status list/class; headers; extract from header/cookie; cookie jar carries between steps.
+
+### 19.7 Phase 5 — authoring helpers
+
+- `apiprobe scaffold "METHOD /path" [--as ROLE]`: prints one ready plan step: path params as `{{name}}`, required query params, the right body key for the preferred content type, required body fields filled from `example` → `default` → first `enum` → typed placeholder (`"{{$uuid}}"` for strings, `0`, `false`, `[]`), file fields as `{"file": "files/CHANGE_ME"}`, and `expect.status` = first 2xx in the spec. `--json` prints only the step object.
+- `apiprobe check PLAN.json`: no HTTP to the API (spec fetch only). Runs `validate_plan`, then per step: endpoint and method exist in the spec, required path/query params and required body fields present, unknown body fields as warnings, body key matches a content type the endpoint accepts, upload files exist. Exit 0 ok / 1 problems / 2 error. Output: one line per problem with `steps[i]`.
+- Plan-level `vars`: `{"vars": {"depotId": 12}}` seeds the variable map; `extract` may overwrite.
+- `run` accepts several plan files or a folder (`*.json`, sorted): one saved run per plan, plus a suite summary line; exit is the worst of all. `--only STEP_ID` runs steps up to and including that id (cleanup still runs).
+- Spec cache: `~/.apiprobe/cache/<app>-<env>.json` with fetch time; reused for 10 minutes by `find`/`show`/`scaffold`/`check`; `--refresh` bypasses. `run` never needs the spec. An `ENDPOINT_NOT_FOUND` result bypasses the cache and refetches once (the API may have been rebuilt), and the skill's stale-API step says to pass `--refresh` after a rebuild.
+- Tests: scaffold for JSON, multipart and path-param endpoints; check catches missing required field, wrong method, unknown path; vars; folder run summary; `--only`.
+
+### 19.8 Phase 6 — YAML specs (D18)
+
+- `pyproject.toml`: `[project.optional-dependencies] yaml = ["pyyaml>=6"]`.
+- `spec.load_spec`: try JSON; on failure try `yaml.safe_load` if importable; if PyYAML is missing, `SPEC_UNAVAILABLE` with "install with `uv tool install --editable \".[yaml]\"`".
+- Tests: YAML fixture loads when PyYAML is present (`skipUnless`), clear error when not (patch import).
+
+### 19.9 Phase 7 — skill and docs refresh (runs after each phase lands, not only at the end)
+
+`skill/SKILL.md`:
+- **Request body choice:** read `requestBody.contentTypes` from `show`; map `application/json` → `body`, `application/x-www-form-urlencoded` → `form`, `multipart/form-data` → `multipart`, `text/*`/XML → `text`, `application/octet-stream` → `file`. Upload fixtures go in `<repo>/.apiprobe/files/`; ask before creating large files or using real documents; paths outside the repo are rejected (D15).
+- **Identifying auth type** (D16), in order:
+  1. `apiprobe show` `Auth:` line / `components.securitySchemes` in the spec (`http bearer` → token; `http basic` → `scheme: Basic`; `apiKey` in header/query/cookie → `header`/`query`/`cookie` with its `name`).
+  2. Code: .NET `AddJwtBearer` (bearer), `AddAuthentication("ApiKey")` / custom `AuthenticationHandler` reading `Request.Headers["X-Api-Key"]` (header key), `AuthenticationHeaderValue("Basic"` (basic); FastAPI `HTTPBearer`, `APIKeyHeader(name=…)`, `APIKeyQuery`, `APIKeyCookie`, `HTTPBasic`; Express/Nest `req.headers['x-api-key']`, `passport-http-bearer`, `passport-headerapikey`, `@ApiBearerAuth`/`@ApiSecurity`; Spring `oauth2ResourceServer().jwt()` (bearer), `httpBasic()` (basic), filters reading a header.
+  3. Unsure → ask the user, listing what was found.
+  - Basic: never ask for or accept a username/password; ask the user to paste the pre-encoded value into the config field themselves.
+  - How to get the key: config/secrets files (`appsettings.Development.json`, `.env`) only tell *where* it lives; ask the user to paste it, never copy it from the repo into chat.
+- **Token-saving rules:** `scaffold` before writing a step; `check` before asking for approval; read brief `run --json`; on failure use `last --step ID` / `--pick` instead of rerunning or opening saved run files; never `cat` a saved run.
+- **Negative-case checklist** additions: wrong content type (415), missing required file part, oversized file (413), disallowed extension, empty form field, wrong/missing API key (401/403).
+- Plan format reference and quick command reference updated with new keys, operators, `scaffold`, `check`, `last`, `runs`.
+
+`skill/APP_SETUP.md`:
+- Discovery table: auth type (the D16 list above) and upload limits (`MaxRequestBodySize`, `[RequestSizeLimit]`, `multer` `limits`, `spring.servlet.multipart.max-file-size`).
+- Config schema reference: the D16 user forms.
+
+`README.md`: new commands, body types, auth forms, `apiprobe[yaml]`.
+
+### 19.10 Order and commits
+
+| Phase | Commit | Est. new code |
+|---|---|---|
+| 0 | baseline (this section + pending skill change) | — |
+| 1 + skill | request body types | ~150 lines + tests |
+| 2 + skill | auth types | ~80 + tests |
+| 3 + skill | output economy | ~120 + tests |
+| 4 + skill | assertions/extraction | ~100 + tests |
+| 5 + skill | authoring helpers | ~200 + tests |
+| 6 + skill | YAML | ~20 + tests |
+
+### 19.11 v2 acceptance criteria
+
+1. A multipart upload with two files and a JSON part, a form post, and a raw XML post each pass against the stub server, from both a plan and `apiprobe call`.
+2. A plan with an upload path outside the repo fails validation and sends nothing.
+3. Each D16 auth form reaches the stub correctly; a query-string key never appears unmasked in output or saved runs.
+4. `run --json` on an all-passing 5-step plan prints under 1 KB; `last --step` returns the full detail of one step.
+5. A binary download is reported as size + sha256, never as decoded bytes.
+6. `scaffold` output for a fixture endpoint passes `check` without edits except `CHANGE_ME` file paths.
+7. Every v1 plan and test still passes unchanged.
+
+### 19.12 Still out of scope
+
+Deferred by D19 (`poll`, `expect.schema`, `continueOnFailure`), plus GraphQL, WebSockets, SSE, gRPC, Swagger 2.0, OAuth flows, DB access. Section 3 and 17 otherwise unchanged.

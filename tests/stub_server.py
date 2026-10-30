@@ -1,13 +1,33 @@
-"""Tiny local HTTP server for tests: echo, items CRUD, protected (Bearer tok-*), slow, text."""
+"""Tiny local HTTP server for tests: echo, form/upload echo, items CRUD, protected (Bearer tok-*), slow, text."""
+import hashlib
 import json
 import threading
 import time
 import urllib.parse
 import uuid
+from email.parser import BytesParser
+from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 FIXTURE = Path(__file__).parent / "fixtures" / "openapi.json"
+YAML_FIXTURE = FIXTURE.with_name("openapi.yaml")
+
+
+BINARY = b"%PDF-1.4\n\x00\xff\xfe\x80 binary"
+
+
+def _parse_multipart(content_type: str, raw: bytes) -> list:
+    msg = BytesParser(policy=default).parsebytes(f"Content-Type: {content_type}\r\n\r\n".encode() + raw)
+    parts = []
+    for part in msg.iter_parts():
+        payload = part.get_payload(decode=True)
+        filename = part.get_filename()
+        parts.append({"name": part.get_param("name", header="content-disposition"), "filename": filename,
+                      "contentType": part.get_content_type() if part["Content-Type"] else None,
+                      "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+                      "value": None if filename else payload.decode()})
+    return parts
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -20,20 +40,55 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain" if text is not None else "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
-        self.wfile.write(raw)
+        if self.command != "HEAD":
+            self.wfile.write(raw)
+
+    def _reply_bytes(self, status, raw, content_type, headers=None, cookies=()):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        for c in cookies:
+            self.send_header("Set-Cookie", c)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(raw)
 
     def _handle(self):
         url = urllib.parse.urlsplit(self.path)
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
-        body = json.loads(raw) if raw else None
-        self.server.requests.append({"method": self.command, "path": url.path, "headers": dict(self.headers), "body": body})
+        try:
+            body = json.loads(raw) if raw else None
+        except ValueError:  # form, multipart, text and file bodies
+            body = None
+        self.server.requests.append({"method": self.command, "path": url.path, "headers": dict(self.headers), "body": body, "raw": raw})
         auth = self.headers.get("Authorization", "")
         parts = url.path.strip("/").split("/")
 
         if url.path == "/echo":
             return self._reply(200, {"method": self.command, "query": urllib.parse.parse_qs(url.query),
                                      "headers": {"X-Test": self.headers.get("X-Test")}, "body": body, "auth": auth})
+        if url.path == "/form-echo":
+            return self._reply(200, {"contentType": self.headers.get("Content-Type"), "fields": urllib.parse.parse_qs(raw.decode())})
+        if url.path == "/upload-echo":
+            return self._reply(200, {"contentType": self.headers.get("Content-Type"), "parts": _parse_multipart(self.headers.get("Content-Type", ""), raw)})
+        if url.path == "/binary":  # a "PDF" with bytes that are not valid UTF-8
+            return self._reply_bytes(200, BINARY, "application/pdf", {"Content-Disposition": 'attachment; filename="r.pdf"', "ETag": '"v1"', "X-Secret": "hidden"})
+        if url.path == "/cookies":
+            return self._reply_bytes(200, b'{"ok": true}', "application/json", cookies=["session=SESSIONVALUE; Path=/", "XSRF-TOKEN=XVALUE"])
+        if url.path == "/created":
+            host = self.headers["Host"]
+            return self._reply_bytes(201, b'{"items": [1, 2, 3]}', "application/json", {"Location": f"http://{host}/items/42", "X-Total": "5"})
+        if url.path == "/redirect":
+            return self._reply_bytes(302, b"", "text/plain", {"Location": "http://elsewhere.test/login"})
+        if url.path == "/other-location":
+            return self._reply_bytes(201, b"{}", "application/json", {"Location": "http://elsewhere.test/items/42"})
+        if url.path == "/login-cookie":
+            return self._reply_bytes(200, b'{"ok": true}', "application/json", cookies=["sid=abc123; Path=/"])
+        if url.path == "/need-cookie":
+            return self._reply(200, {"ok": True}) if "sid=abc123" in self.headers.get("Cookie", "") else self._reply(401, {"message": "no session"})
         if url.path == "/protected":
             return self._reply(200, {"ok": True}) if auth.startswith("Bearer tok-") else self._reply(401, {"message": "no token"})
         if url.path == "/slow":
@@ -41,6 +96,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply(200, {})
         if url.path == "/text":
             return self._reply(200, text="hello")
+        if url.path == "/openapi.yaml":
+            return self._reply_bytes(200, YAML_FIXTURE.read_bytes(), "application/yaml")
         if url.path == "/openapi.json":
             return self._reply(200, json.loads(FIXTURE.read_text()))
         if parts[0] == "items":
@@ -52,7 +109,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._reply(204)
         return self._reply(404, {"message": "not found"})
 
-    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _handle
 
 
 class StubServer:

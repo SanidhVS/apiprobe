@@ -57,6 +57,34 @@
         "responses": { "200": { "description": "Success" }, "403": { "description": "Forbidden" } }
       }
     },
+    "/api/documents": {
+      "post": {
+        "tags": ["Documents"],
+        "summary": "Upload document",
+        "operationId": "UploadDocument",
+        "security": [{ "ApiKey": [] }, { "Bearer": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["title", "file"],
+                "properties": {
+                  "title": { "type": "string" },
+                  "file": { "type": "string", "format": "binary" },
+                  "attachments": { "type": "array", "items": { "type": "string", "format": "binary" } }
+                }
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": { "type": "object", "properties": { "title": { "type": "string" } } }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Created" } }
+      }
+    },
     "/api/staff/{id}": {
       "get": {
         "tags": ["Staff"],
@@ -72,6 +100,10 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "Bearer": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" },
+      "ApiKey": { "type": "apiKey", "in": "header", "name": "X-Api-Key" }
+    },
     "parameters": {
       "IdParam": { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
     },

@@ -19,11 +19,25 @@ This puts `apiprobe.exe` in `~/.local/bin`. If `apiprobe` is not found, run `uv 
 
 Don't also `pip install` it into your global Python — two installs can shadow each other.
 
-Install the Claude Code skill by copying the `skill/` folder:
+Install the Claude Code skill by linking the `skill/` folder (from the repo root), so `git pull` keeps it current:
 
 ```powershell
-Copy-Item -Recurse -Force skill "$HOME\.claude\skills\apiprobe"
+New-Item -ItemType Junction -Path "$HOME\.claude\skills\apiprobe" -Target "$PWD\skill"
 ```
+
+On macOS/Linux: `ln -s "$PWD/skill" ~/.claude/skills/apiprobe`. If you copied the folder before, delete that copy first.
+
+### Other AI harnesses
+
+The CLI is harness-independent; only the skill install path is Claude-specific. Any assistant with shell access can drive it: put the body of `skill/SKILL.md` (everything after the `---` frontmatter) where that tool reads standing instructions, and keep `APP_SETUP.md` next to it or inline it.
+
+| Tool | Where |
+|------|-------|
+| Codex, Copilot agent, others reading `AGENTS.md` | `AGENTS.md` in the repo root |
+| Cursor | `.cursor/rules/apiprobe.mdc` |
+| Gemini CLI | `GEMINI.md` |
+
+The assistant must be able to run `apiprobe` and ask you to approve the plan before running it. Clients with no shell access (MCP-only) are not supported.
 
 Tests (uv creates `.venv` from `uv.lock` on first run): `uv run python -m unittest discover -s tests -v`
 
@@ -67,8 +81,9 @@ Or just ask Claude Code: "test the create leave endpoint" — the skill sets up 
 }
 ```
 
-- `specUrl`: `/path` → joined to `baseUrl`; `http...` → as is; otherwise a local file (relative to `repoPath`). OpenAPI 3.x JSON only.
-- Auth is bearer tokens only (`Authorization: Bearer <token>`); apiprobe never handles usernames or passwords. Get a token from your app's login endpoint (e.g. in Swagger UI) or the browser devtools, and paste it in.
+- `specUrl`: `/path` → joined to `baseUrl`; `http...` → as is; otherwise a local file (relative to `repoPath`). OpenAPI 3.x as JSON, or as YAML with the optional extra: `uv tool install --editable ".[yaml]" --force` (adds PyYAML; without it a YAML spec fails with that command in the error, and everything else stays standard-library only).
+- Auth is token-only; apiprobe never handles usernames or passwords. Default is `Authorization: Bearer <token>`. Add one of `"scheme": "Basic"` (paste the base64 `user:password` value yourself), `"header": "X-Api-Key"`, `"query": "api_key"` (masked as `***` in output) or `"cookie": "session"` to a user for other schemes. Get a token from your app's login endpoint (e.g. in Swagger UI) or the browser devtools, and paste it in.
+- `apiprobe show` prints the endpoint's `Auth:` requirement; `apiprobe app --json` lists the spec's security schemes (`--no-spec` skips the fetch).
 - A `CHANGE_ME` token only errors when a command or plan actually uses that role. A JWT past its `exp` stops the run with TOKEN_EXPIRED before any request; a 401 shows a "token may be expired" hint. Either way: paste a fresh token and rerun.
 
 ## Plan file
@@ -100,13 +115,21 @@ Saved in the app repo at `.apiprobe/plans/<slug>.json` so the team can share it.
 }
 ```
 
-Assertions: plain JSON value (deep-equal), `{"exists": true|false}`, `{"contains": x}` (substring or list element). Missing `expect.status` → any 2xx passes. Built-in variables: `{{$uuid}}`, `{{$now}}`. After the first failing step the rest are skipped; cleanup always runs. Full rules are in `skill/SKILL.md`.
+Assertions: plain JSON value (deep-equal) or one-key operators `exists`, `contains`, `matches` (regex), `length`, `type`, `gt`/`gte`/`lt`/`lte`, `in`, `equals` (for a literal object whose only key is an operator name). `expect.status` takes an integer, a list or a class like `"2xx"` (missing → any 2xx); `expect.headers`, `expect.text` and `expect.maxMs` check headers, raw body text and response time. `extract` reads a body path, `"header:Location"` or `"cookie:NAME"`; a plan with `"cookies": true` carries cookies between steps. Built-in variables: `{{$uuid}}`, `{{$now}}`. After the first failing step the rest are skipped; cleanup always runs. Full rules are in `skill/SKILL.md`.
 
-Every run is saved to `~/.apiprobe/runs/<app>/<UTC timestamp>-<plan>.json` (full response bodies; no request headers, so no tokens).
+Request bodies: a call carries at most one of `body` (JSON), `form` (urlencoded), `multipart` (text, `{"json": X}` and `{"file": path}` parts), `text` or `file` (raw). Upload files must live inside the app's `repoPath` or the plan's folder (put fixtures in `<repo>/.apiprobe/files/`); anything else is rejected before a request is sent. Runs record file name, size and type, never file bytes.
+
+Plan-level `"vars": {"depotId": 12}` seeds variables; `extract` may overwrite them.
+
+Binary responses (PDF, images, archives…) are never decoded: the body is reported as `{"binary": true, "bytes", "contentType", "sha256"}` and can be asserted on. `call.saveTo` (inside the repo or plan folder) also writes the bytes of a 2xx response to disk.
+
+Every run is saved to `~/.apiprobe/runs/<app>/<UTC timestamp>-<plan>.json` (full response bodies; no request headers, so no tokens). The newest 50 runs per app are kept; older ones are deleted.
+
+Redirects are not followed: a 3xx comes back as the step's result (assert on `status` and `headers.Location`), and the token is never sent to another host.
 
 ## Commands
 
-Global flags (after the command): `--app NAME`, `--env NAME`, `--json`.
+Global flags (after the command): `--app NAME`, `--env NAME`, `--json`. `find`, `show`, `scaffold` and `check` cache the fetched spec for 10 minutes in `~/.apiprobe/cache/`; `--refresh` bypasses it, and an endpoint missing from a cached spec refetches once.
 
 | Command | Does | Exit |
 |---|---|---|
@@ -114,13 +137,17 @@ Global flags (after the command): `--app NAME`, `--env NAME`, `--json`.
 | `apiprobe init NAME [--repo PATH]` | Write config template (`--repo` defaults to cwd) | 0 / 2 if exists |
 | `apiprobe find TEXT` | Search spec | 0 (also with no results) |
 | `apiprobe show "METHOD /path"` | Describe one endpoint | 0 / 2 |
-| `apiprobe call METHOD PATH [--as ROLE] [--body JSON or @file] [--query k=v ...] [--header k=v ...]` | One request, no assertions | 0 if 2xx, 1 otherwise, 2 on error |
-| `apiprobe run PLAN.json` | Execute plan | 0 passed / 1 failed / 2 error |
+| `apiprobe scaffold "METHOD /path" [--as ROLE]` | Print one ready plan step (path variables, required fields, body type, expected status) | 0 / 2 |
+| `apiprobe check PLAN.json` | Check a plan against the spec without calling the API: endpoints, required query params, body type, and JSON body values (type, enum, uuid/date formats, nested required fields; `{{vars}}` skipped) | 0 ok / 1 problems / 2 error |
+| `apiprobe call METHOD PATH [--as ROLE] [--body JSON/@file / --form k=v / --part k=v or k=@path[;type=MIME][;filename=N] / --text STR/@file / --file @path] [--query k=v ...] [--header k=v ...] [--pick PATH] [--header-out NAME] [--max-chars N] [--full]` | One request, no assertions (one body flag). `--json` is compact; `--full` prints everything | 0 if 2xx, 1 otherwise, 2 on error |
+| `apiprobe run PLAN.json ... [--only STEP_ID] [--max-chars N] [--full]` | Execute plans (several files or a folder of `*.json`: one saved run each plus a suite summary); `--only` stops after that step, cleanup still runs; `--json` is compact, `--full` prints everything | 0 passed / 1 failed / 2 error, including an unreachable API (worst of all) |
+| `apiprobe last [--step ID [--pick PATH]] [--plan NAME]` | Newest saved run (compact), one step in full, or one value of its response body | 0 / 2 |
+| `apiprobe runs [--limit N]` | List saved runs, newest first (default 10) | 0 |
 
 ## Security notes
 
-- Configs hold **plaintext bearer tokens** (no passwords). They live in your home folder, never in a repo. Use dev/test accounts only; short-lived tokens limit the damage if one leaks.
+- Configs hold **plaintext tokens** (no passwords). They live in your home folder, never in a repo. Use dev/test accounts only; short-lived tokens limit the damage if one leaks.
 - A token you paste into the AI chat ends up in the conversation transcript. To keep it out, paste it straight into the config file instead.
 - Only put dev/test environments in configs. **Never prod.** Plans contain only paths, never full URLs, so a plan can only reach hosts that are in your config.
-- Responses (which may contain dev data) are read by the AI assistant. If your dev DB holds copies of real personal data, keep that in mind.
+- Responses (which may contain dev data) are read by the AI assistant and saved in plain text under `~/.apiprobe/runs/` (last 50 per app). If your dev DB holds copies of real personal data, keep that in mind.
 - `verifyTls: false` disables certificate checks for that environment; use it only for local self-signed certs.

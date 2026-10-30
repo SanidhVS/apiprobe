@@ -6,14 +6,13 @@ import traceback
 import urllib.parse
 from pathlib import Path
 
-from . import __version__, config, http, runner, spec
+from . import __version__, config, http, runner, spec, store
+from .scaffold import check_plan, scaffold as make_step
+from .brief import brief_call, brief_run, pick, truncate as _truncate
+from .body import BODY_KEYS, resolve_file
 from .errors import ApiProbeError
 
 BODY_LIMIT = 1500
-
-
-def _truncate(text: str, limit: int = BODY_LIMIT) -> str:
-    return text if len(text) <= limit else text[:limit] + f"... ({len(text) - limit} more chars, see saved run)"
 
 
 def _body_text(body) -> str:
@@ -41,17 +40,77 @@ def _kv(pairs, flag) -> dict:
     return out
 
 
+def _multi(pairs, flag) -> dict:
+    """k=v pairs; a repeated key becomes a list."""
+    out = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise ApiProbeError("PLAN_INVALID", f"{flag} expects k=v, got '{pair}'")
+        k, v = pair.split("=", 1)
+        out[k] = [*out[k], v] if isinstance(out.get(k), list) else [out[k], v] if k in out else v
+    return out
+
+
+def _part(value: str, where: str, base, roots):
+    """--part value: plain text, or @path[;type=mime][;filename=x] for a file part."""
+    if not value.startswith("@"):
+        return value
+    path, *opts = value[1:].split(";")
+    part = {"file": str(resolve_file(path, where, base, roots))}
+    for opt in opts:
+        key, _, val = opt.partition("=")
+        if key not in ("type", "filename") or not val:
+            raise ApiProbeError("PLAN_INVALID", f"{where}: expected ';type=MIME' or ';filename=NAME' after the path, got ';{opt}'")
+        part["contentType" if key == "type" else "filename"] = val
+    return part
+
+
+def _body_args(args, app) -> dict:
+    """Body flags -> http.send keywords; files must sit inside the app repo or the current folder (D15)."""
+    given = {"body": args.body, "form": args.form, "multipart": args.part, "text": args.text, "file": args.file}
+    used = [k for k in BODY_KEYS if given[k] is not None]
+    if len(used) > 1:
+        raise ApiProbeError("PLAN_INVALID", f"use only one body flag, got {', '.join('--' + ('part' if k == 'multipart' else k) for k in used)}")
+    base, roots = Path.cwd(), [app.get("repoPath"), Path.cwd()]
+    if args.form:
+        return {"form": _multi(args.form, "--form")}
+    if args.part:
+        return {"multipart": {k: [_part(x, f"--part {k}", base, roots) for x in v] if isinstance(v, list) else _part(v, f"--part {k}", base, roots)
+                              for k, v in _multi(args.part, "--part").items()}}
+    if args.text is not None:
+        if args.text.startswith("@"):
+            return {"text": resolve_file(args.text[1:], "--text", base, roots).read_text(encoding="utf-8-sig")}
+        return {"text": args.text}
+    if args.file is not None:
+        return {"file": str(resolve_file(args.file.removeprefix("@"), "--file", base, roots))}
+    return {}
+
+
 # ---------- commands: each returns (result, exit_code, human_printer) ----------
+
+def _auth_label(s: dict) -> str:
+    if s["type"] == "http":
+        return f"http {s.get('scheme', '?')}"
+    if s["type"] == "apiKey":
+        return f"{s.get('param')} {s.get('in')} (apiKey)"
+    return s["type"] or f"{s['id']} (not defined in components.securitySchemes)"
+
 
 def cmd_app(args):
     apps = config.list_apps()
     try:
-        detected = _app(args)["name"]
+        app = _app(args)
+        detected = app["name"]
     except ApiProbeError as e:
         if e.code != "APP_NOT_FOUND" or args.app:
             raise
-        detected = None
+        app = detected = None
     result = {"detected": detected, "apps": apps}
+    if app and not args.no_spec:
+        try:  # best effort: the API may not be running
+            result["securitySchemes"] = spec.security_schemes(spec.load_spec(app, config.resolve_env(app, args.env)))
+        except ApiProbeError:
+            pass
 
     def show():
         if not apps:
@@ -65,17 +124,23 @@ def cmd_app(args):
                 print(f"    ! {a['error']}")
         if not detected:
             print("No app detected for this folder (pass --app NAME).")
+        for s in result.get("securitySchemes", {}).values():
+            print(f"spec auth: {_auth_label(s)}")
     return result, 0, show
 
 
 def cmd_init(args):
     path = config.init_app(args.name, args.repo or str(Path.cwd()))
-    return {"path": str(path)}, 0, lambda: print(f"Wrote {path}\nSet baseUrl/specUrl, then replace each CHANGE_ME with a bearer token for that role.")
+    return {"path": str(path)}, 0, lambda: print(f"Wrote {path}\nSet baseUrl/specUrl, then replace each CHANGE_ME with a token for that role.")
 
 
 def cmd_find(args):
     app = _app(args)
-    found = spec.find(spec.load_spec(app, config.resolve_env(app, args.env)), args.text)
+    env = config.resolve_env(app, args.env)
+    doc, cached = spec.cached_spec(app, env, args.refresh)
+    found = spec.find(doc, args.text)
+    if not found and cached:  # the API may have been rebuilt since the spec was cached
+        found = spec.find(spec.cached_spec(app, env, True)[0], args.text)
 
     def show():
         for e in found:
@@ -96,13 +161,18 @@ def _print_fields(fields, indent="    "):
         print(f"{indent}{f['property']}  {f['type']}" + (f"  [{', '.join(extra)}]" if extra else ""))
 
 
-def cmd_show(args):
+def _target(args, command: str) -> list:
     target = " ".join(args.target).split(None, 1)
     if len(target) != 2:
-        raise ApiProbeError("ENDPOINT_NOT_FOUND", 'show expects "METHOD /path", e.g. apiprobe show "GET /api/leave/{id}"')
+        raise ApiProbeError("ENDPOINT_NOT_FOUND", f'{command} expects "METHOD /path", e.g. apiprobe {command} "GET /api/leave/{{id}}"')
     _check_path(target[1], "ENDPOINT_NOT_FOUND")
+    return target
+
+
+def cmd_show(args):
+    target = _target(args, "show")
     app = _app(args)
-    d = spec.describe(spec.load_spec(app, config.resolve_env(app, args.env)), target[0], target[1])
+    d = spec.with_spec(app, config.resolve_env(app, args.env), lambda doc: spec.describe(doc, target[0], target[1]), args.refresh)
 
     def show():
         print(f"{d['method']} {d['path']}" + (f" — {d['summary']}" if d["summary"] else ""))
@@ -111,10 +181,16 @@ def cmd_show(args):
             for p in d["parameters"]:
                 enum = f"  enum: {json.dumps(p['enum'])}" if p.get("enum") else ""
                 print(f"    {p['name']} ({p['in']}{', required' if p['required'] else ''})  {p['type']}{enum}")
+        if d["security"]:
+            print("Auth: " + " | ".join(" + ".join(_auth_label(s) for s in alt) for alt in d["security"]))
         if d["requestBody"]:
             rb = d["requestBody"]
-            print(f"Request body ({rb['contentType']}{', required' if rb['required'] else ''}):")
-            _print_fields(rb["fields"])
+            shown = []  # preferred type first; types with identical fields print once
+            for ct in sorted(rb["contentTypes"] or [rb], key=lambda c: c["contentType"] != rb["contentType"]):
+                if ct["fields"] not in shown:
+                    shown.append(ct["fields"])
+                    print(f"Request body ({ct['contentType']}{', required' if rb['required'] else ''}):")
+                    _print_fields(ct["fields"])
         print("Responses:")
         for code, r in d["responses"].items():
             print(f"  {code} {r['description'] or ''}" + (f"  ({r['contentType']})" if r.get("contentType") else ""))
@@ -122,31 +198,63 @@ def cmd_show(args):
     return d, 0, show
 
 
+def cmd_scaffold(args):
+    method, path = _target(args, "scaffold")
+    app = _app(args)
+    step = spec.with_spec(app, config.resolve_env(app, args.env), lambda doc: make_step(doc, method, path, args.as_), args.refresh)
+    return step, 0, lambda: print(json.dumps(step, indent=2, ensure_ascii=False))
+
+
+def cmd_check(args):
+    plan = runner.load_plan(args.plan)
+    app = _app(args)
+    env = config.resolve_env(app, args.env or (plan.get("environment") if isinstance(plan, dict) else None))
+    files = runner.plan_files(app, str(Path(args.plan).resolve()))
+    doc, cached = spec.cached_spec(app, env, args.refresh)
+    problems, warnings = check_plan(doc, plan, env, files)
+    if cached and any("is not in the spec" in p for p in problems):  # the API may have been rebuilt since the spec was cached
+        problems, warnings = check_plan(spec.cached_spec(app, env, True)[0], plan, env, files)
+    result = {"plan": args.plan, "ok": not problems, "problems": problems, "warnings": warnings}
+
+    def show():
+        for p in problems:
+            print(p)
+        for w in warnings:
+            print(f"warning: {w}")
+        steps = len(plan.get("steps", [])) if isinstance(plan, dict) else 0
+        print(f"OK  {steps} steps checked against the spec" if not problems else f"{len(problems)} problem(s) in {args.plan}")
+    return result, 1 if problems else 0, show
+
+
 def cmd_call(args):
     _check_path(args.path, "PLAN_INVALID")
-    body = None
+    app = _app(args)
+    sent = _body_args(args, app)
     if args.body is not None:
         try:
             raw = Path(args.body[1:]).read_text(encoding="utf-8-sig") if args.body.startswith("@") else args.body
-            body = json.loads(raw)
+            sent = {"body": json.loads(raw)}
         except OSError as e:
             raise ApiProbeError("PLAN_INVALID", f"--body file could not be read: {e}")
         except json.JSONDecodeError as e:
             raise ApiProbeError("PLAN_INVALID", f"--body is not valid JSON: {e.msg}")
-    app = _app(args)
     env = config.resolve_env(app, args.env)
-    token = config.get_user(app, env, args.as_)["token"] if args.as_ else None
+    auth = config.get_user(app, env, args.as_) if args.as_ else None
     resp = http.send(env, app.get("timeoutSeconds", 30), args.method, args.path,
-                     _kv(args.query, "--query"), _kv(args.header, "--header"), body, token)
+                     _kv(args.query, "--query"), _kv(args.header, "--header"), auth=auth, **sent)
     code = 0 if 200 <= resp["status"] < 300 else 1
+    shown = resp if args.full else brief_call(resp, args.header_out or (), args.pick)
 
     def show():
         print(f"{args.method.upper()} {resp['url']}  →  {resp['status']}  {resp['durationMs']}ms")
-        if resp["bodyText"]:
-            print(_truncate(_body_text(resp["body"]) if resp["body"] is not None else resp["bodyText"]))
-        if resp["status"] == 401 and args.as_:
+        if args.pick is not None:
+            picked = pick(resp["body"], args.pick)
+            print(_truncate(_body_text(picked["value"]), args.max_chars) if picked["found"] else f"path '{args.pick}' not found in the response body")
+        elif resp["bodyText"] or resp["binary"]:
+            print(_truncate(_body_text(resp["body"]) if resp["body"] is not None else resp["bodyText"], args.max_chars))
+        if runner.auth_rejected(resp) and args.as_:
             print(f"hint: {runner.token_hint(app, env, args.as_)}", file=sys.stderr)
-    return resp, code, show
+    return shown, code, show
 
 
 def _short(url: str) -> str:
@@ -154,7 +262,7 @@ def _short(url: str) -> str:
     return p.path + (f"?{p.query}" if p.query else "")
 
 
-def _print_report(r: dict):
+def _print_report(r: dict, limit: int = BODY_LIMIT):
     print(f"{r['title']}  [{r['app']} / {r['environment']}]")
     width = max((len(s["id"]) for s in r["steps"]), default=0) + 2
     for s in r["steps"]:
@@ -175,7 +283,7 @@ def _print_report(r: dict):
         if s["error"]:
             print(f"      error [{s['error']['code']}]: {s['error']['message']}")
         if resp and resp["body"] not in (None, ""):
-            print(f"      body: {_truncate(_body_text(resp['body']))}")
+            print(f"      body: {_truncate(_body_text(resp['body']), limit)}")
     if r["cleanup"]:
         print("Cleanup")
         for c in r["cleanup"]:
@@ -195,21 +303,86 @@ def _print_report(r: dict):
           f"  ·  saved: {r['savedTo']}")
 
 
+def _plan_files(paths: list) -> list:
+    files = []
+    for p in paths:
+        if Path(p).is_dir():
+            found = sorted(str(f) for f in Path(p).glob("*.json"))
+            if not found:
+                raise ApiProbeError("PLAN_INVALID", f"no *.json plan files in folder {p}")
+            files += found
+        else:
+            files.append(p)
+    return files
+
+
+def _print_result(r: dict, limit: int):
+    if r["status"] != "error":
+        return _print_report(r, limit)
+    print(f"error [{r['error']['code']}]: {r['error']['message']}", file=sys.stderr)
+    if r.get("savedTo"):
+        print(f"saved: {r['savedTo']}", file=sys.stderr)
+
+
+_RANK = {"passed": 0, "failed": 1, "error": 2}
+
+
 def cmd_run(args):
-    plan = runner.load_plan(args.plan)
+    suite = len(args.plan) > 1 or Path(args.plan[0]).is_dir()
+    files = _plan_files(args.plan)
     app = _app(args)
 
     def progress(event):
         if event["type"] == "step_started":
             print(f"  … {event['id']}  {event['method']} {event['path']}", file=sys.stderr, flush=True)
 
-    result = runner.run_plan(plan, app, args.env, None if args.json else progress, str(Path(args.plan).resolve()))
-    if result["status"] == "error":
-        def show():
-            print(f"error [{result['error']['code']}]: {result['error']['message']}", file=sys.stderr)
-            print(f"saved: {result['savedTo']}", file=sys.stderr)
-        return result, 2, show
-    return result, 0 if result["status"] == "passed" else 1, lambda: _print_report(result)
+    results = []
+    for path in files:
+        try:
+            plan = runner.load_plan(path)
+            results.append(runner.run_plan(plan, app, args.env, None if args.json else progress, str(Path(path).resolve()), args.only))
+        except ApiProbeError as e:
+            if not suite:
+                raise
+            results.append({"app": app["name"], "title": path, "status": "error", "durationMs": 0, "error": e.to_dict(), "steps": [], "savedTo": None})
+    code = max(_RANK[r["status"]] for r in results)
+    shown = [r if args.full else brief_run(r, args.max_chars) for r in results]
+    if not suite:
+        return shown[0], code, lambda: _print_result(results[0], args.max_chars)
+    counts = {k: sum(r["status"] == k for r in results) for k in _RANK}
+
+    def show():
+        for r in results:
+            _print_result(r, args.max_chars)
+        print(f"SUITE {list(_RANK)[code].upper()}  {len(results)} plans: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
+    return {"status": list(_RANK)[code], "counts": counts, "plans": shown}, code, show
+
+
+def cmd_last(args):
+    run = store.latest_run(_app(args)["name"], args.plan)
+    if args.pick is not None and not args.step:
+        raise ApiProbeError("PLAN_INVALID", "--pick needs --step ID: it picks a path from that step's response body")
+    if not args.step:
+        shown = run if args.full else brief_run(run, args.max_chars)
+        return shown, 0, lambda: _print_report(run, args.max_chars)
+    step = next((s for s in run["steps"] if s["id"] == args.step), None)
+    if step is None:
+        raise ApiProbeError("STEP_NOT_FOUND", f"no step '{args.step}' in the last run ({run['savedTo']}); steps: {', '.join(s['id'] for s in run['steps']) or 'none'}")
+    if args.pick is None:
+        return step, 0, lambda: print(json.dumps(step, indent=2, ensure_ascii=False))
+    picked = {"step": step["id"], **pick((step["response"] or {}).get("body"), args.pick)}
+    return picked, 0, lambda: print(_body_text(picked["value"]) if picked["found"] else f"path '{args.pick}' not found in step '{args.step}' response body")
+
+
+def cmd_runs(args):
+    runs = store.list_runs(_app(args)["name"], args.limit)
+
+    def show():
+        for r in runs:
+            print(f"{r['startedAt']}  {str(r['status']):<7} {r['title']}  [{r['environment']}]  {r['path']}")
+        if not runs:
+            print("No saved runs.")
+    return runs, 0, show
 
 
 # ---------- entry point ----------
@@ -224,33 +397,68 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"apiprobe {__version__}")
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    sub.add_parser("app", parents=[common], help="show detected app and all known apps").set_defaults(func=cmd_app)
+    p = sub.add_parser("app", parents=[common], help="show detected app and all known apps")
+    p.add_argument("--no-spec", action="store_true", help="skip fetching the spec for its auth schemes")
+    p.set_defaults(func=cmd_app)
 
     p = sub.add_parser("init", parents=[common], help="write a config template for a new app")
     p.add_argument("name")
     p.add_argument("--repo", metavar="PATH", help="app repo root (default: current folder)")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("find", parents=[common], help="search the OpenAPI spec")
+    specflags = argparse.ArgumentParser(add_help=False)
+    specflags.add_argument("--refresh", action="store_true", help="refetch the spec instead of using the 10-minute cache")
+
+    p = sub.add_parser("find", parents=[common, specflags], help="search the OpenAPI spec")
     p.add_argument("text")
     p.set_defaults(func=cmd_find)
 
-    p = sub.add_parser("show", parents=[common], help='describe one endpoint: show "METHOD /path"')
+    p = sub.add_parser("show", parents=[common, specflags], help='describe one endpoint: show "METHOD /path"')
     p.add_argument("target", nargs="+")
     p.set_defaults(func=cmd_show)
 
-    p = sub.add_parser("call", parents=[common], help="send one request, no assertions")
+    p = sub.add_parser("scaffold", parents=[common, specflags], help='print a ready plan step for an endpoint: scaffold "METHOD /path"')
+    p.add_argument("target", nargs="+")
+    p.add_argument("--as", dest="as_", metavar="ROLE", help="user role to put in the step")
+    p.set_defaults(func=cmd_scaffold)
+
+    p = sub.add_parser("check", parents=[common, specflags], help="check a plan against the spec without calling the API")
+    p.add_argument("plan")
+    p.set_defaults(func=cmd_check)
+
+    shaping = argparse.ArgumentParser(add_help=False)
+    shaping.add_argument("--full", action="store_true", help="print the complete result (default: compact)")
+    shaping.add_argument("--max-chars", type=int, default=BODY_LIMIT, metavar="N", help=f"cut response bodies at N characters (default {BODY_LIMIT})")
+
+    p = sub.add_parser("call", parents=[common, shaping], help="send one request, no assertions")
     p.add_argument("method", type=str.upper, choices=sorted(runner.METHODS))
     p.add_argument("path")
     p.add_argument("--as", dest="as_", metavar="ROLE", help="user role from the config")
     p.add_argument("--body", metavar="JSON|@file")
+    p.add_argument("--form", action="append", metavar="k=v", help="urlencoded form field (repeat a key for a list)")
+    p.add_argument("--part", action="append", metavar="k=v|k=@path[;type=MIME][;filename=NAME]", help="multipart field or file")
+    p.add_argument("--text", metavar="STR|@file", help="raw text body")
+    p.add_argument("--file", metavar="@path", help="raw file body")
     p.add_argument("--query", action="append", metavar="k=v")
     p.add_argument("--header", action="append", metavar="k=v")
+    p.add_argument("--pick", metavar="PATH", help="print only this path of the response body")
+    p.add_argument("--header-out", action="append", metavar="NAME", help="also show this response header (repeatable)")
     p.set_defaults(func=cmd_call)
 
-    p = sub.add_parser("run", parents=[common], help="execute a plan file")
-    p.add_argument("plan")
+    p = sub.add_parser("run", parents=[common, shaping], help="execute plan files (or every *.json in a folder)")
+    p.add_argument("plan", nargs="+")
+    p.add_argument("--only", metavar="STEP_ID", help="run the steps up to and including this one (cleanup still runs)")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("last", parents=[common, shaping], help="show the newest saved run, or one step of it in full")
+    p.add_argument("--step", metavar="ID", help="show this step in full")
+    p.add_argument("--pick", metavar="PATH", help="with --step: only this path of its response body")
+    p.add_argument("--plan", metavar="NAME", help="newest run of this plan (file name or slug)")
+    p.set_defaults(func=cmd_last)
+
+    p = sub.add_parser("runs", parents=[common], help="list saved runs, newest first")
+    p.add_argument("--limit", type=int, default=10, metavar="N")
+    p.set_defaults(func=cmd_runs)
     return parser
 
 

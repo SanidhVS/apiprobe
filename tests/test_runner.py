@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -51,6 +52,12 @@ class HttpTests(TempHome):
     def test_non_json_body(self):
         r = http.send(env_of(self.app), 1, "GET", "/text")
         self.assertEqual((r["body"], r["bodyText"]), (None, "hello"))
+
+    def test_redirect_is_not_followed(self):
+        r = http.send(env_of(self.app), 1, "GET", "/redirect", auth={"token": "tok-admin"})
+        self.assertEqual(r["status"], 302)
+        self.assertEqual(r["headers"]["Location"], "http://elsewhere.test/login")
+        self.assertEqual(len(self.server.requests), 1)
 
     def test_connection_refused(self):
         with self.assertRaises(ApiProbeError) as ctx:
@@ -145,11 +152,12 @@ class RunnerTests(TempHome):
         self.assertEqual(r["steps"][0]["assertions"][1]["message"], "response is not JSON")
         self.assertEqual(r["steps"][0]["response"]["body"], "hello")
 
-    def test_request_failed_marks_step_failed(self):
+    def test_request_failed_is_a_run_error(self):
         self.app["environments"]["local"]["baseUrl"] = "http://127.0.0.1:1"
         r, _ = self.run_plan({"title": "t", "steps": [{"id": "a", "call": {"method": "GET", "path": "/x"}}]})
-        self.assertEqual(r["status"], "failed")
-        self.assertEqual(r["steps"][0]["error"]["code"], "REQUEST_FAILED")
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["error"]["code"], "REQUEST_FAILED")
+        self.assertEqual(r["steps"][0]["status"], "failed")
 
     def test_rejected_token_gets_hint(self):
         self.app["environments"]["local"]["users"]["admin"]["token"] = "revoked"
@@ -221,6 +229,18 @@ class RunnerTests(TempHome):
         runs = store.list_runs("demo")
         self.assertEqual(runs[0]["status"], "passed")
         self.assertEqual(runs[0]["title"], "Create and read item")
+
+    def test_old_runs_are_deleted(self):
+        keep, store.KEEP_RUNS = store.KEEP_RUNS, 2
+        try:
+            paths = []
+            for age in (20, 10, 0):  # distinct write times: runs saved in the same second sort by them
+                paths.append(store.save_run("demo", {"title": "r"}))
+                t = time.time() - age
+                os.utime(paths[-1], (t, t))
+        finally:
+            store.KEEP_RUNS = keep
+        self.assertEqual([p.exists() for p in paths], [False, True, True])
 
 
 if __name__ == "__main__":
