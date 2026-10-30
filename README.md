@@ -27,6 +27,18 @@ New-Item -ItemType Junction -Path "$HOME\.claude\skills\apiprobe" -Target "$PWD\
 
 On macOS/Linux: `ln -s "$PWD/skill" ~/.claude/skills/apiprobe`. If you copied the folder before, delete that copy first.
 
+### Other AI harnesses
+
+The CLI is harness-independent; only the skill install path is Claude-specific. Any assistant with shell access can drive it: put the body of `skill/SKILL.md` (everything after the `---` frontmatter) where that tool reads standing instructions, and keep `APP_SETUP.md` next to it or inline it.
+
+| Tool | Where |
+|------|-------|
+| Codex, Copilot agent, others reading `AGENTS.md` | `AGENTS.md` in the repo root |
+| Cursor | `.cursor/rules/apiprobe.mdc` |
+| Gemini CLI | `GEMINI.md` |
+
+The assistant must be able to run `apiprobe` and ask you to approve the plan before running it. Clients with no shell access (MCP-only) are not supported.
+
 Tests (uv creates `.venv` from `uv.lock` on first run): `uv run python -m unittest discover -s tests -v`
 
 ## Quick start
